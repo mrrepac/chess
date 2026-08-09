@@ -1,0 +1,28 @@
+{
+  "name": "chess",
+  "version": "0.1.0",
+  "description": "Obsidian plugin: play chess against a bot with adjustable 1-10 difficulty.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "test": "node tests/run.mjs"
+  },
+  "keywords": [
+    "obsidian-plugin",
+    "chess",
+    "game"
+  ],
+  "author": "mrrepac",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^16.11.6",
+    "esbuild": "0.17.3",
+    "obsidian": "latest",
+    "tslib": "2.4.0",
+    "typescript": "4.7.4"
+  },
+  "dependencies": {
+    "chess.js": "^1.4.0"
+  }
+}
