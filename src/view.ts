@@ -55,6 +55,8 @@ export class ChessView extends ItemView {
   private transientHint: string | null = null;
   private hintTimer: number | null = null;
   private newGamePromptOpen = false;
+  /** Dismisses a promotion picker that was mounted outside the view root. */
+  private finishPromotion: ((result: PieceSymbol | undefined) => void) | null = null;
   /** The level and contextual action can change behind the view's back. */
   private syncToolbar: () => void = () => {};
 
@@ -288,6 +290,7 @@ export class ChessView extends ItemView {
 
   async onClose() {
     this.contentEl.removeEventListener("keydown", this.handleViewKeyDown);
+    this.finishPromotion?.(undefined);
     this.finishDrag();
     this.sounds.close();
     this.boardResize?.disconnect();
@@ -700,14 +703,19 @@ export class ChessView extends ItemView {
       const overlay = this.doc.body.createDiv({ cls: "chess-bot-promo-overlay" });
       const box = overlay.createDiv({ cls: "chess-bot-promo-choices" });
       const options: PieceSymbol[] = ["q", "r", "b", "n"];
+      let settled = false;
       const finish = (result: PieceSymbol | undefined) => {
+        if (settled) return;
+        settled = true;
         this.doc.removeEventListener("keydown", onKey);
         overlay.remove();
+        if (this.finishPromotion === finish) this.finishPromotion = null;
         resolve(result);
       };
       const onKey = (e: Event) => {
         if ((e as KeyboardEvent).key === "Escape") finish(undefined);
       };
+      this.finishPromotion = finish;
       for (const type of options) {
         const btn = box.createEl("button");
         setTooltip(btn, this.promotionLabel(type));

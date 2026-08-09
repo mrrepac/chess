@@ -19,6 +19,12 @@ function ensureWorkerUrl(): string {
   return workerUrl;
 }
 
+function releaseWorkerUrl(): void {
+  if (!workerUrl) return;
+  URL.revokeObjectURL(workerUrl);
+  workerUrl = null;
+}
+
 let nextRequestId = 1;
 
 export type Listener = () => void;
@@ -103,6 +109,15 @@ export class GameController {
     this.cancelActiveRequest = null;
     cancel?.();
     this.thinking = false;
+  }
+
+  /** Stops work that belongs to the plugin instance and releases the module's
+   *  Blob URL. Called when Obsidian disables or reloads the plugin. */
+  dispose(): void {
+    this.abortBotSearch();
+    this.pauseHumanClock();
+    this.listeners.clear();
+    releaseWorkerUrl();
   }
 
   newGame(

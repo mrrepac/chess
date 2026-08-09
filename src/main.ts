@@ -44,6 +44,10 @@ export default class ChessBotPlugin extends Plugin {
     this.addSettingTab(new ChessSettingTab(this.app, this));
   }
 
+  onunload(): void {
+    this.controller?.dispose();
+  }
+
   async activateView() {
     const { workspace } = this.app;
     let leaf = workspace.getLeavesOfType(VIEW_TYPE_CHESS)[0];

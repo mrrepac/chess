@@ -4,6 +4,18 @@ export default async function run() {
   const s = suite("controller");
   const workers = [];
   let workerConstructorThrows = false;
+  const workerUrls = [];
+  const revokedWorkerUrls = [];
+  const URLStub = {
+    createObjectURL() {
+      const url = `blob:chess-test-${workerUrls.length + 1}`;
+      workerUrls.push(url);
+      return url;
+    },
+    revokeObjectURL(url) {
+      revokedWorkerUrls.push(url);
+    }
+  };
 
   class WorkerStub {
     constructor() {
@@ -25,7 +37,9 @@ export default async function run() {
   const src = await bundle("src/game-controller.ts", {
     ENGINE_WORKER_SOURCE: JSON.stringify("")
   });
-  const { GameController, DEFAULT_CLOCK_MINUTES } = load(src, { globals: { Worker: WorkerStub } });
+  const { GameController, DEFAULT_CLOCK_MINUTES } = load(src, {
+    globals: { Worker: WorkerStub, URL: URLStub }
+  });
 
   s.check("restore rebuilds move history and undo state", () => {
     const original = new GameController();
@@ -430,6 +444,18 @@ export default async function run() {
     workerConstructorThrows = false;
     s.check("a worker that cannot start reports instead of hanging",
       result === null && !controller.thinking && typeof controller.engineError === "string");
+  }
+
+  {
+    const controller = new GameController();
+    controller.newGame("b");
+    const pending = controller.requestBotMove();
+    const worker = workers.at(-1);
+    const url = workerUrls.at(-1);
+    controller.dispose();
+    const result = await pending;
+    s.check("disposing cancels a pending bot move and releases its Blob URL",
+      result === null && worker.terminated && revokedWorkerUrls.includes(url) && !controller.thinking);
   }
 
   return s.report();

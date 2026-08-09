@@ -48,6 +48,7 @@ jobs:
             main.js
             manifest.json
             styles.css
+            THIRD_PARTY_NOTICES.md
 
       - name: Create or update release with assets
         env:
@@ -59,5 +60,5 @@ jobs:
           gh release create "$tag" \
             --title="$tag" \
             --notes="Chess $tag. See README for details." \
-            main.js manifest.json styles.css \
-            || gh release upload "$tag" main.js manifest.json styles.css --clobber
+            main.js manifest.json styles.css THIRD_PARTY_NOTICES.md \
+            || gh release upload "$tag" main.js manifest.json styles.css THIRD_PARTY_NOTICES.md --clobber

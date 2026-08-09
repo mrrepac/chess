@@ -30,6 +30,14 @@ export default async function run() {
   const styles = await readFile(new URL("../styles.css", import.meta.url), "utf8");
   s.check("the board opts out of Obsidian's aria-label tooltips",
     /\.chess-bot-board\s*\{[^}]*--no-tooltip:\s*true/s.test(styles));
+  s.check("closing a view dismisses a promotion picker mounted on document.body",
+    /onClose\(\)[\s\S]*?this\.finishPromotion\?\.\(undefined\)/.test(viewSource));
+
+  const buildSource = await readFile(new URL("../esbuild.config.mjs", import.meta.url), "utf8");
+  s.check("the installed bundle retains the Papercut attribution",
+    /const banner = `\/\*!/.test(buildSource)
+      && /Nikolay Anzarov/.test(buildSource)
+      && /creativecommons\.org\/licenses\/by\/4\.0/.test(buildSource));
 
   const registered = [];
   const commands = [];
@@ -86,6 +94,12 @@ export default async function run() {
   s.check("the board follows the player by default", plugin.settings.boardOrientation === "player");
   s.check("creates a game controller with a starting position", () =>
     plugin.controller.chess.fen().startsWith("rnbqkbnr/pppppppp"));
+  s.check("plugin unload disposes its controller", () => {
+    let disposed = false;
+    plugin.controller.dispose = () => { disposed = true; };
+    plugin.onunload();
+    return disposed;
+  });
 
   await plugin.persistGame();
   s.check("persistGame writes a saved game to data.json", () => savedData.current?.savedGame?.fen != null);
