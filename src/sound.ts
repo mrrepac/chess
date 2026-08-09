@@ -5,6 +5,7 @@ type SoundKind = "start" | "move" | "capture" | "check" | "win" | "loss" | "draw
 /** Small Web Audio soundscape: warm, restrained, and dependency-free. */
 export class ChessSounds {
   private context: AudioContext | null = null;
+  private closed = false;
 
   constructor(private readonly volume: () => number) {}
 
@@ -61,14 +62,18 @@ export class ChessSounds {
   }
 
   close(): void {
+    this.closed = true;
     if (this.context) void this.context.close();
     this.context = null;
   }
 
+  /** Once closed, stay closed: a bot move can still land after the pane is gone,
+   *  and re-creating a context there leaks one nobody will ever close. */
   private getContext(): AudioContext | null {
+    if (this.closed) return null;
     if (this.context) return this.context;
     try {
-      this.context = new AudioContext();
+      this.context = new window.AudioContext();
       return this.context;
     } catch {
       return null;

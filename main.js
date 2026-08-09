@@ -31,10 +31,67 @@ __export(main_exports, {
   default: () => ChessBotPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian3 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 
 // src/settings.ts
+var import_obsidian2 = require("obsidian");
+
+// src/confirm.ts
 var import_obsidian = require("obsidian");
+var ConfirmModal = class extends import_obsidian.Modal {
+  constructor(app, title, body, confirmLabel, resolve) {
+    super(app);
+    this.title = title;
+    this.body = body;
+    this.confirmLabel = confirmLabel;
+    this.resolve = resolve;
+    this.decided = false;
+    this.confirmEl = null;
+    this.cancelEl = null;
+    this.handleKey = (event) => {
+      if (event.key !== "Enter" || this.decided)
+        return;
+      if (this.contentEl.doc.activeElement === this.cancelEl)
+        return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.finish(true);
+    };
+  }
+  onOpen() {
+    this.titleEl.setText(this.title);
+    this.contentEl.createEl("p", { text: this.body });
+    new import_obsidian.Setting(this.contentEl).addButton((button) => {
+      button.setButtonText("\u041E\u0442\u043C\u0435\u043D\u0430").onClick(() => this.finish(false));
+      this.cancelEl = button.buttonEl;
+    }).addButton((button) => {
+      button.setButtonText(this.confirmLabel).setWarning().onClick(() => this.finish(true));
+      this.confirmEl = button.buttonEl;
+    });
+    this.contentEl.doc.addEventListener("keydown", this.handleKey, true);
+    this.contentEl.win.setTimeout(() => this.confirmEl?.focus(), 0);
+  }
+  /** Closing by Escape or by clicking outside also has to answer the promise,
+   *  or the caller waits for a decision that will never arrive. */
+  onClose() {
+    this.contentEl.doc.removeEventListener("keydown", this.handleKey, true);
+    this.contentEl.empty();
+    if (!this.decided) {
+      this.decided = true;
+      this.resolve(false);
+    }
+  }
+  finish(confirmed) {
+    this.decided = true;
+    this.resolve(confirmed);
+    this.close();
+  }
+};
+function confirm(app, title, body, confirmLabel) {
+  return new Promise((resolve) => {
+    new ConfirmModal(app, title, body, confirmLabel, resolve).open();
+  });
+}
 
 // src/types.ts
 var DEFAULT_SETTINGS = {
@@ -42,38 +99,106 @@ var DEFAULT_SETTINGS = {
   playerColor: "w",
   soundEnabled: true,
   soundVolume: 55,
+  timeControlMinutes: 10,
+  incrementSeconds: 0,
+  showEvaluation: false,
+  showMoveArrow: true,
+  adaptiveDifficulty: false,
+  adaptiveThreshold: 3,
+  resultStreak: 0,
+  levelStats: {},
   savedGame: null
 };
+var MIN_DIFFICULTY = 1;
+var MAX_DIFFICULTY = 10;
+var MIN_ADAPTIVE_THRESHOLD = 1;
+var MAX_ADAPTIVE_THRESHOLD = 5;
+function clampDifficulty(value) {
+  const level = Math.round(Number(value));
+  if (!Number.isFinite(level))
+    return DEFAULT_SETTINGS.difficulty;
+  return Math.min(MAX_DIFFICULTY, Math.max(MIN_DIFFICULTY, level));
+}
+function clampAdaptiveThreshold(value) {
+  const games = Math.round(Number(value));
+  if (!Number.isFinite(games))
+    return DEFAULT_SETTINGS.adaptiveThreshold;
+  return Math.min(MAX_ADAPTIVE_THRESHOLD, Math.max(MIN_ADAPTIVE_THRESHOLD, games));
+}
+function sanitizeLevelStats(raw) {
+  const stats = {};
+  if (!raw || typeof raw !== "object")
+    return stats;
+  const count = (value) => {
+    const games = Math.round(Number(value));
+    return Number.isFinite(games) && games > 0 ? games : 0;
+  };
+  for (const [key, value] of Object.entries(raw)) {
+    const level = Number(key);
+    if (!Number.isInteger(level) || level < MIN_DIFFICULTY || level > MAX_DIFFICULTY)
+      continue;
+    if (!value || typeof value !== "object")
+      continue;
+    const record = value;
+    const cleaned = {
+      wins: count(record.wins),
+      losses: count(record.losses),
+      draws: count(record.draws)
+    };
+    if (cleaned.wins + cleaned.losses + cleaned.draws > 0)
+      stats[level] = cleaned;
+  }
+  return stats;
+}
+function formatRecord(record) {
+  if (!record)
+    return "";
+  const { wins, losses, draws } = record;
+  if (wins + losses + draws === 0)
+    return "";
+  return `${wins}\u2013${losses}\u2013${draws}`;
+}
+function describeRecord(record) {
+  if (!formatRecord(record) || !record)
+    return "";
+  return `\u041F\u043E\u0431\u0435\u0434 ${record.wins} \xB7 \u043F\u043E\u0440\u0430\u0436\u0435\u043D\u0438\u0439 ${record.losses} \xB7 \u043D\u0438\u0447\u044C\u0438\u0445 ${record.draws}`;
+}
 var DIFFICULTY_PROFILES = {
-  1: { depth: 1, timeBudgetMs: 150, quiescence: false, topN: 5, blunderChance: 0.35, blunderPoolFraction: 0.6 },
-  2: { depth: 1, timeBudgetMs: 200, quiescence: false, topN: 4, blunderChance: 0.25, blunderPoolFraction: 0.5 },
-  3: { depth: 2, timeBudgetMs: 300, quiescence: false, topN: 3, blunderChance: 0.15, blunderPoolFraction: 0.4 },
-  4: { depth: 2, timeBudgetMs: 500, quiescence: true, topN: 3, blunderChance: 0.08, blunderPoolFraction: 0.35 },
-  5: { depth: 3, timeBudgetMs: 700, quiescence: true, topN: 2, blunderChance: 0.04, blunderPoolFraction: 0.3 },
-  6: { depth: 4, timeBudgetMs: 900, quiescence: true, topN: 2, blunderChance: 0.01, blunderPoolFraction: 0.25 },
-  7: { depth: 5, timeBudgetMs: 1200, quiescence: true, topN: 1, blunderChance: 0, blunderPoolFraction: 0 },
-  8: { depth: 6, timeBudgetMs: 1500, quiescence: true, topN: 1, blunderChance: 0, blunderPoolFraction: 0 },
-  9: { depth: 7, timeBudgetMs: 2e3, quiescence: true, topN: 1, blunderChance: 0, blunderPoolFraction: 0 },
-  10: { depth: 8, timeBudgetMs: 3e3, quiescence: true, topN: 1, blunderChance: 0, blunderPoolFraction: 0 }
+  1: { depth: 1, timeBudgetMs: 200, quiescence: false, topN: 5, blunderChance: 0.35, blunderPoolFraction: 0.6, openingBook: false },
+  2: { depth: 1, timeBudgetMs: 250, quiescence: false, topN: 4, blunderChance: 0.25, blunderPoolFraction: 0.5, openingBook: false },
+  3: { depth: 2, timeBudgetMs: 400, quiescence: false, topN: 3, blunderChance: 0.15, blunderPoolFraction: 0.4, openingBook: false },
+  4: { depth: 2, timeBudgetMs: 700, quiescence: true, topN: 3, blunderChance: 0.08, blunderPoolFraction: 0.35, openingBook: false },
+  5: { depth: 2, timeBudgetMs: 1e3, quiescence: true, topN: 2, blunderChance: 0.04, blunderPoolFraction: 0.3, openingBook: true },
+  6: { depth: 3, timeBudgetMs: 1500, quiescence: true, topN: 2, blunderChance: 0.02, blunderPoolFraction: 0.25, openingBook: true },
+  7: { depth: 3, timeBudgetMs: 1200, quiescence: true, topN: 1, blunderChance: 0, blunderPoolFraction: 0, openingBook: true },
+  8: { depth: 4, timeBudgetMs: 2e3, quiescence: true, topN: 1, blunderChance: 0, blunderPoolFraction: 0, openingBook: true },
+  9: { depth: 4, timeBudgetMs: 3e3, quiescence: true, topN: 1, blunderChance: 0, blunderPoolFraction: 0, openingBook: true },
+  10: { depth: 5, timeBudgetMs: 4e3, quiescence: true, topN: 1, blunderChance: 0, blunderPoolFraction: 0, openingBook: true }
 };
 function describeDifficulty(level) {
   const labels = {
     1: "1 \u2014 \u0441\u043E\u0432\u0441\u0435\u043C \u043D\u043E\u0432\u0438\u0447\u043E\u043A, \u043F\u043E\u0441\u0442\u043E\u044F\u043D\u043D\u043E \u0437\u0435\u0432\u0430\u0435\u0442 \u0444\u0438\u0433\u0443\u0440\u044B",
     2: "2 \u2014 \u043E\u0447\u0435\u043D\u044C \u0441\u043B\u0430\u0431\u044B\u0439, \u043B\u0435\u0433\u043A\u043E \u043E\u0431\u044B\u0433\u0440\u0430\u0442\u044C",
-    3: "3 \u2014 \u0432\u0438\u0434\u0438\u0442 \u043D\u0430 \u043E\u0434\u0438\u043D \u0445\u043E\u0434 \u0432\u043F\u0435\u0440\u0451\u0434",
-    4: "4 \u2014 \u0437\u0430\u043C\u0435\u0447\u0430\u0435\u0442 \u043F\u0440\u043E\u0441\u0442\u044B\u0435 \u0441\u0432\u044F\u0437\u043A\u0438",
+    3: "3 \u2014 \u0432\u0438\u0434\u0438\u0442 \u043D\u0430 \u043E\u0434\u0438\u043D \u0445\u043E\u0434 \u0432\u043F\u0435\u0440\u0451\u0434, \u0437\u0435\u0432\u0430\u0435\u0442 \u0440\u0430\u0437\u043C\u0435\u043D\u044B",
+    4: "4 \u2014 \u0441\u0447\u0438\u0442\u0430\u0435\u0442 \u0440\u0430\u0437\u043C\u0435\u043D\u044B, \u043D\u043E \u0447\u0430\u0441\u0442\u043E \u0432\u044B\u0431\u0438\u0440\u0430\u0435\u0442 \u043D\u0435 \u043B\u0443\u0447\u0448\u0438\u0439 \u0445\u043E\u0434",
     5: "5 \u2014 \u0438\u0433\u0440\u0430\u0435\u0442 \u0440\u0430\u0437\u0443\u043C\u043D\u043E, \u0438\u043D\u043E\u0433\u0434\u0430 \u043E\u0448\u0438\u0431\u0430\u0435\u0442\u0441\u044F",
-    6: "6 \u2014 \u043A\u0440\u0435\u043F\u043A\u0438\u0439 \u043B\u044E\u0431\u0438\u0442\u0435\u043B\u044C\u0441\u043A\u0438\u0439 \u0443\u0440\u043E\u0432\u0435\u043D\u044C",
-    7: "7 \u2014 \u0440\u0435\u0434\u043A\u043E \u043E\u0448\u0438\u0431\u0430\u0435\u0442\u0441\u044F, \u0441\u0447\u0438\u0442\u0430\u0435\u0442 \u0442\u0430\u043A\u0442\u0438\u043A\u0443",
-    8: "8 \u2014 \u0443\u0432\u0435\u0440\u0435\u043D\u043D\u043E \u043D\u0430\u0445\u043E\u0434\u0438\u0442 \u0442\u0430\u043A\u0442\u0438\u043A\u0443",
-    9: "9 \u2014 \u0441\u0438\u043B\u044C\u043D\u044B\u0439, \u043C\u0430\u043B\u043E \u0441\u043B\u0430\u0431\u043E\u0441\u0442\u0435\u0439",
-    10: "10 \u2014 \u043F\u043E\u0442\u043E\u043B\u043E\u043A \u0434\u0432\u0438\u0436\u043A\u0430 (\u043D\u0435 \u0433\u0440\u043E\u0441\u0441\u043C\u0435\u0439\u0441\u0442\u0435\u0440, \u043D\u043E \u043A\u0440\u0435\u043F\u043A\u0438\u0439 \u043A\u043B\u0443\u0431\u043D\u044B\u0439 \u0438\u0433\u0440\u043E\u043A)"
+    6: "6 \u2014 \u043A\u0440\u0435\u043F\u043A\u0438\u0439 \u043B\u044E\u0431\u0438\u0442\u0435\u043B\u044C\u0441\u043A\u0438\u0439 \u0443\u0440\u043E\u0432\u0435\u043D\u044C, \u0434\u0443\u043C\u0430\u0435\u0442 \u0434\u043E 1,5 \u0441",
+    7: "7 \u2014 \u0432\u0441\u0435\u0433\u0434\u0430 \u0438\u0433\u0440\u0430\u0435\u0442 \u043B\u0443\u0447\u0448\u0438\u0439 \u043D\u0430\u0439\u0434\u0435\u043D\u043D\u044B\u0439 \u0445\u043E\u0434, \u0434\u043E 1,2 \u0441",
+    8: "8 \u2014 \u0441\u0447\u0438\u0442\u0430\u0435\u0442 \u0433\u043B\u0443\u0431\u0436\u0435, \u0434\u0443\u043C\u0430\u0435\u0442 \u0434\u043E 2 \u0441",
+    9: "9 \u2014 \u0442\u043E \u0436\u0435, \u043D\u043E \u0441 \u0437\u0430\u043F\u0430\u0441\u043E\u043C \u0432\u0440\u0435\u043C\u0435\u043D\u0438: \u0434\u043E 3 \u0441",
+    10: "10 \u2014 \u043F\u043E\u0442\u043E\u043B\u043E\u043A \u0434\u0432\u0438\u0436\u043A\u0430: \u0434\u043E 4 \u0441 \u043D\u0430 \u0445\u043E\u0434, \u043A\u0440\u0435\u043F\u043A\u0438\u0439 \u043A\u043B\u0443\u0431\u043D\u044B\u0439 \u0443\u0440\u043E\u0432\u0435\u043D\u044C"
   };
   return labels[level];
 }
 
 // src/settings.ts
-var ChessSettingTab = class extends import_obsidian.PluginSettingTab {
+function describeThreshold(games) {
+  if (games === 1)
+    return "1 \u2014 \u0443\u0440\u043E\u0432\u0435\u043D\u044C \u043C\u0435\u043D\u044F\u0435\u0442\u0441\u044F \u043F\u043E\u0441\u043B\u0435 \u043A\u0430\u0436\u0434\u043E\u0439 \u043F\u0430\u0440\u0442\u0438\u0438";
+  const plural = games === 2 || games === 3 || games === 4 ? "\u043F\u043E\u0431\u0435\u0434\u044B" : "\u043F\u043E\u0431\u0435\u0434";
+  return `${games} \u2014 ${games} ${plural} \u043F\u043E\u0434\u0440\u044F\u0434 \u043F\u043E\u0434\u043D\u0438\u043C\u0430\u044E\u0442 \u0443\u0440\u043E\u0432\u0435\u043D\u044C, \u0441\u0442\u043E\u043B\u044C\u043A\u043E \u0436\u0435 \u043F\u043E\u0440\u0430\u0436\u0435\u043D\u0438\u0439 \u043E\u043F\u0443\u0441\u043A\u0430\u044E\u0442`;
+}
+var ChessSettingTab = class extends import_obsidian2.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -81,25 +206,98 @@ var ChessSettingTab = class extends import_obsidian.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    const difficultySetting = new import_obsidian.Setting(containerEl).setName("\u0421\u043B\u043E\u0436\u043D\u043E\u0441\u0442\u044C \u0431\u043E\u0442\u0430").setDesc(describeDifficulty(this.plugin.settings.difficulty));
+    const difficultySetting = new import_obsidian2.Setting(containerEl).setName("\u0421\u043B\u043E\u0436\u043D\u043E\u0441\u0442\u044C \u0431\u043E\u0442\u0430").setDesc(describeDifficulty(this.plugin.settings.difficulty));
     difficultySetting.addSlider((slider) => slider.setLimits(1, 10, 1).setDynamicTooltip().setValue(this.plugin.settings.difficulty).onChange(async (value) => {
-      this.plugin.settings.difficulty = value;
-      difficultySetting.setDesc(describeDifficulty(value));
-      await this.plugin.saveSettings();
+      difficultySetting.setDesc(describeDifficulty(clampDifficulty(value)));
+      await this.plugin.setDifficulty(clampDifficulty(value));
     }));
-    new import_obsidian.Setting(containerEl).setName("\u0426\u0432\u0435\u0442 \u043F\u043E \u0443\u043C\u043E\u043B\u0447\u0430\u043D\u0438\u044E").setDesc("\u041A\u0430\u043A\u0438\u043C \u0446\u0432\u0435\u0442\u043E\u043C \u0438\u0433\u0440\u0430\u0442\u044C \u0432 \u043D\u043E\u0432\u043E\u0439 \u043F\u0430\u0440\u0442\u0438\u0438 (\xAB\u0421\u043B\u0443\u0447\u0430\u0439\u043D\u043E\xBB \u0432\u044B\u0431\u0438\u0440\u0430\u0435\u0442 \u043F\u0440\u0438 \u043A\u0430\u0436\u0434\u043E\u0439 \u043D\u043E\u0432\u043E\u0439 \u0438\u0433\u0440\u0435).").addDropdown((dropdown) => dropdown.addOption("w", "\u0411\u0435\u043B\u044B\u0435").addOption("b", "\u0427\u0451\u0440\u043D\u044B\u0435").addOption("random", "\u0421\u043B\u0443\u0447\u0430\u0439\u043D\u043E").setValue(this.plugin.settings.playerColor).onChange(async (value) => {
+    new import_obsidian2.Setting(containerEl).setName("\u041F\u043E\u0434\u0441\u0442\u0440\u0430\u0438\u0432\u0430\u0442\u044C \u0441\u043B\u043E\u0436\u043D\u043E\u0441\u0442\u044C \u043F\u043E\u0434 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442").setDesc("\u0423\u0440\u043E\u0432\u0435\u043D\u044C \u0434\u0432\u0438\u0433\u0430\u0435\u0442\u0441\u044F \u043D\u0430 \u0435\u0434\u0438\u043D\u0438\u0446\u0443, \u043A\u043E\u0433\u0434\u0430 \u043E\u0434\u0438\u043D \u0438 \u0442\u043E\u0442 \u0436\u0435 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442 \u043F\u043E\u0432\u0442\u043E\u0440\u044F\u0435\u0442\u0441\u044F \u043F\u043E\u0434\u0440\u044F\u0434. \u041D\u0438\u0447\u044C\u044F \u0438 \u043F\u0430\u0442 \u0441\u0435\u0440\u0438\u044E \u043F\u0440\u0435\u0440\u044B\u0432\u0430\u044E\u0442, \u043D\u043E \u0443\u0440\u043E\u0432\u0435\u043D\u044C \u043D\u0435 \u043C\u0435\u043D\u044F\u044E\u0442. \u041E\u0442\u043C\u0435\u043D\u0430 \u0445\u043E\u0434\u0430 \u0432 \u0437\u0430\u043A\u043E\u043D\u0447\u0435\u043D\u043D\u043E\u0439 \u043F\u0430\u0440\u0442\u0438\u0438 \u043E\u0442\u043C\u0435\u043D\u044F\u0435\u0442 \u0438 \u0435\u0451 \u0432\u043A\u043B\u0430\u0434 \u0432 \u0441\u0435\u0440\u0438\u044E.").addToggle((toggle) => toggle.setValue(this.plugin.settings.adaptiveDifficulty).onChange(async (value) => {
+      this.plugin.settings.adaptiveDifficulty = value;
+      await this.plugin.saveSettings();
+      this.display();
+    }));
+    if (this.plugin.settings.adaptiveDifficulty) {
+      const thresholdSetting = new import_obsidian2.Setting(containerEl).setName("\u041F\u0430\u0440\u0442\u0438\u0439 \u043F\u043E\u0434\u0440\u044F\u0434 \u0434\u043B\u044F \u0441\u043C\u0435\u043D\u044B \u0443\u0440\u043E\u0432\u043D\u044F").setDesc(describeThreshold(this.plugin.settings.adaptiveThreshold));
+      thresholdSetting.addSlider((slider) => slider.setLimits(MIN_ADAPTIVE_THRESHOLD, MAX_ADAPTIVE_THRESHOLD, 1).setDynamicTooltip().setValue(this.plugin.settings.adaptiveThreshold).onChange(async (value) => {
+        const games = clampAdaptiveThreshold(value);
+        this.plugin.settings.adaptiveThreshold = games;
+        thresholdSetting.setDesc(describeThreshold(games));
+        await this.plugin.saveSettings();
+      }));
+    }
+    new import_obsidian2.Setting(containerEl).setName("\u0426\u0432\u0435\u0442 \u043F\u043E \u0443\u043C\u043E\u043B\u0447\u0430\u043D\u0438\u044E").setDesc("\u041A\u0430\u043A\u0438\u043C \u0446\u0432\u0435\u0442\u043E\u043C \u0438\u0433\u0440\u0430\u0442\u044C \u0432 \u043D\u043E\u0432\u043E\u0439 \u043F\u0430\u0440\u0442\u0438\u0438 (\xAB\u0421\u043B\u0443\u0447\u0430\u0439\u043D\u043E\xBB \u0432\u044B\u0431\u0438\u0440\u0430\u0435\u0442 \u043F\u0440\u0438 \u043A\u0430\u0436\u0434\u043E\u0439 \u043D\u043E\u0432\u043E\u0439 \u0438\u0433\u0440\u0435).").addDropdown((dropdown) => dropdown.addOption("w", "\u0411\u0435\u043B\u044B\u0435").addOption("b", "\u0427\u0451\u0440\u043D\u044B\u0435").addOption("random", "\u0421\u043B\u0443\u0447\u0430\u0439\u043D\u043E").setValue(this.plugin.settings.playerColor).onChange(async (value) => {
       this.plugin.settings.playerColor = value;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("\u0417\u0432\u0443\u043A\u0438 \u0438\u0433\u0440\u044B").setDesc("\u041C\u044F\u0433\u043A\u0438\u0435 \u0437\u0432\u0443\u043A\u0438 \u0445\u043E\u0434\u043E\u0432, \u0432\u0437\u044F\u0442\u0438\u0439, \u0448\u0430\u0445\u0430 \u0438 \u043E\u043A\u043E\u043D\u0447\u0430\u043D\u0438\u044F \u043F\u0430\u0440\u0442\u0438\u0438.").addToggle((toggle) => toggle.setValue(this.plugin.settings.soundEnabled).onChange(async (value) => {
+    new import_obsidian2.Setting(containerEl).setName("\u041A\u043E\u043D\u0442\u0440\u043E\u043B\u044C \u0432\u0440\u0435\u043C\u0435\u043D\u0438").setDesc("\u0421\u043A\u043E\u043B\u044C\u043A\u043E \u043C\u0438\u043D\u0443\u0442 \u0434\u0430\u0451\u0442\u0441\u044F \u0432\u0430\u043C \u043D\u0430 \u043F\u0430\u0440\u0442\u0438\u044E. \u041E\u0442\u0441\u0447\u0451\u0442 \u043D\u0430\u0447\u0438\u043D\u0430\u0435\u0442\u0441\u044F \u0441 \u0432\u0430\u0448\u0435\u0433\u043E \u043F\u0435\u0440\u0432\u043E\u0433\u043E \u0445\u043E\u0434\u0430 \u0438 \u0438\u0434\u0451\u0442 \u0442\u043E\u043B\u044C\u043A\u043E \u043F\u043E\u043A\u0430 \u0434\u043E\u0441\u043A\u0430 \u043E\u0442\u043A\u0440\u044B\u0442\u0430.").addDropdown((dropdown) => dropdown.addOption("0", "\u0411\u0435\u0437 \u0447\u0430\u0441\u043E\u0432").addOption("5", "5 \u043C\u0438\u043D\u0443\u0442").addOption("10", "10 \u043C\u0438\u043D\u0443\u0442").addOption("15", "15 \u043C\u0438\u043D\u0443\u0442").addOption("30", "30 \u043C\u0438\u043D\u0443\u0442").addOption("60", "60 \u043C\u0438\u043D\u0443\u0442").setValue(String(this.plugin.settings.timeControlMinutes)).onChange(async (value) => {
+      this.plugin.settings.timeControlMinutes = Number(value);
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian2.Setting(containerEl).setName("\u0414\u043E\u0431\u0430\u0432\u043A\u0430 \u0437\u0430 \u0445\u043E\u0434").setDesc("\u0421\u043A\u043E\u043B\u044C\u043A\u043E \u0441\u0435\u043A\u0443\u043D\u0434 \u0432\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u0435\u0442\u0441\u044F \u043D\u0430 \u0432\u0430\u0448\u0438 \u0447\u0430\u0441\u044B \u043F\u043E\u0441\u043B\u0435 \u043A\u0430\u0436\u0434\u043E\u0433\u043E \u0432\u0430\u0448\u0435\u0433\u043E \u0445\u043E\u0434\u0430. \u041F\u0440\u0438\u043C\u0435\u043D\u044F\u0435\u0442\u0441\u044F \u043A \u043D\u043E\u0432\u044B\u043C \u043F\u0430\u0440\u0442\u0438\u044F\u043C.").addDropdown((dropdown) => dropdown.addOption("0", "\u0411\u0435\u0437 \u0434\u043E\u0431\u0430\u0432\u043A\u0438").addOption("2", "+2 \u0441\u0435\u043A\u0443\u043D\u0434\u044B").addOption("3", "+3 \u0441\u0435\u043A\u0443\u043D\u0434\u044B").addOption("5", "+5 \u0441\u0435\u043A\u0443\u043D\u0434").addOption("10", "+10 \u0441\u0435\u043A\u0443\u043D\u0434").addOption("30", "+30 \u0441\u0435\u043A\u0443\u043D\u0434").setValue(String(this.plugin.settings.incrementSeconds)).onChange(async (value) => {
+      this.plugin.settings.incrementSeconds = Number(value);
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian2.Setting(containerEl).setName("\u041F\u043E\u043A\u0430\u0437\u044B\u0432\u0430\u0442\u044C \u043E\u0446\u0435\u043D\u043A\u0443 \u0431\u043E\u0442\u0430").setDesc("\u041F\u043E\u0441\u043B\u0435 \u0445\u043E\u0434\u0430 \u0431\u043E\u0442\u0430 \u0432\u044B\u0432\u043E\u0434\u0438\u0442 \u0435\u0433\u043E \u0441\u043E\u0431\u0441\u0442\u0432\u0435\u043D\u043D\u0443\u044E \u043E\u0446\u0435\u043D\u043A\u0443 \u043F\u043E\u0437\u0438\u0446\u0438\u0438 \u0432 \u043F\u0435\u0448\u043A\u0430\u0445.").addToggle((toggle) => toggle.setValue(this.plugin.settings.showEvaluation).onChange(async (value) => {
+      this.plugin.settings.showEvaluation = value;
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian2.Setting(containerEl).setName("\u0421\u0442\u0440\u0435\u043B\u043A\u0430 \u0445\u043E\u0434\u0430 \u0431\u043E\u0442\u0430").setDesc("\u041F\u043E\u0441\u043B\u0435 \u0445\u043E\u0434\u0430 \u0431\u043E\u0442\u0430 \u0440\u0438\u0441\u0443\u0435\u0442 \u043D\u0430 \u0434\u043E\u0441\u043A\u0435 \u0441\u0442\u0440\u0435\u043B\u043A\u0443 \u043E\u0442 \u043F\u043E\u043B\u044F \u043A \u043F\u043E\u043B\u044E. \u041F\u043E\u0434\u0441\u0432\u0435\u0442\u043A\u0430 \u043E\u0431\u043E\u0438\u0445 \u043F\u043E\u043B\u0435\u0439 \u043E\u0441\u0442\u0430\u0451\u0442\u0441\u044F \u0432 \u043B\u044E\u0431\u043E\u043C \u0441\u043B\u0443\u0447\u0430\u0435.").addToggle((toggle) => toggle.setValue(this.plugin.settings.showMoveArrow).onChange(async (value) => {
+      this.plugin.settings.showMoveArrow = value;
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian2.Setting(containerEl).setName("\u0417\u0432\u0443\u043A\u0438 \u0438\u0433\u0440\u044B").setDesc("\u041C\u044F\u0433\u043A\u0438\u0435 \u0437\u0432\u0443\u043A\u0438 \u0445\u043E\u0434\u043E\u0432, \u0432\u0437\u044F\u0442\u0438\u0439, \u0448\u0430\u0445\u0430 \u0438 \u043E\u043A\u043E\u043D\u0447\u0430\u043D\u0438\u044F \u043F\u0430\u0440\u0442\u0438\u0438.").addToggle((toggle) => toggle.setValue(this.plugin.settings.soundEnabled).onChange(async (value) => {
       this.plugin.settings.soundEnabled = value;
       await this.plugin.saveSettings();
     }));
-    const volumeSetting = new import_obsidian.Setting(containerEl).setName("\u0413\u0440\u043E\u043C\u043A\u043E\u0441\u0442\u044C \u0437\u0432\u0443\u043A\u043E\u0432").setDesc(`${this.plugin.settings.soundVolume}%`);
+    const volumeSetting = new import_obsidian2.Setting(containerEl).setName("\u0413\u0440\u043E\u043C\u043A\u043E\u0441\u0442\u044C \u0437\u0432\u0443\u043A\u043E\u0432").setDesc(`${this.plugin.settings.soundVolume}%`);
     volumeSetting.addSlider((slider) => slider.setLimits(0, 100, 1).setDynamicTooltip().setValue(this.plugin.settings.soundVolume).onChange(async (value) => {
       this.plugin.settings.soundVolume = value;
       volumeSetting.setDesc(`${value}%`);
       await this.plugin.saveSettings();
+    }));
+    this.displayStats(containerEl);
+  }
+  /**
+   * Finished games per level. Only levels that have been played are listed —
+   * ten rows of zeroes would say nothing — and the tally counts the level a
+   * game ended at, which is where the bot was actually playing from.
+   */
+  displayStats(containerEl) {
+    const stats = this.plugin.settings.levelStats;
+    const levels = Object.keys(stats).map(Number).filter((level) => Number.isInteger(level)).sort((a, b) => a - b);
+    new import_obsidian2.Setting(containerEl).setName("\u0421\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043A\u0430").setHeading();
+    if (levels.length === 0) {
+      containerEl.createEl("p", {
+        cls: "setting-item-description",
+        text: "\u041D\u0438 \u043E\u0434\u043D\u043E\u0439 \u0437\u0430\u043A\u043E\u043D\u0447\u0435\u043D\u043D\u043E\u0439 \u043F\u0430\u0440\u0442\u0438\u0438 \u043F\u043E\u043A\u0430 \u043D\u0435\u0442. \u0421\u0447\u0451\u0442 \u043F\u043E\u044F\u0432\u0438\u0442\u0441\u044F \u0437\u0434\u0435\u0441\u044C \u0441\u0430\u043C."
+      });
+      return;
+    }
+    const total = { wins: 0, losses: 0, draws: 0 };
+    for (const level of levels) {
+      const record = stats[level];
+      if (!record)
+        continue;
+      total.wins += record.wins;
+      total.losses += record.losses;
+      total.draws += record.draws;
+      new import_obsidian2.Setting(containerEl).setName(`\u0423\u0440\u043E\u0432\u0435\u043D\u044C ${level}`).setDesc(describeRecord(record));
+    }
+    if (levels.length > 1) {
+      new import_obsidian2.Setting(containerEl).setName("\u0412\u0441\u0435\u0433\u043E").setDesc(describeRecord(total));
+    }
+    new import_obsidian2.Setting(containerEl).setName("\u0421\u0431\u0440\u043E\u0441\u0438\u0442\u044C \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043A\u0443").setDesc("\u0421\u0442\u0438\u0440\u0430\u0435\u0442 \u0441\u0447\u0451\u0442 \u043F\u043E \u0432\u0441\u0435\u043C \u0443\u0440\u043E\u0432\u043D\u044F\u043C. \u0422\u0435\u043A\u0443\u0449\u0443\u044E \u0441\u0435\u0440\u0438\u044E \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u043E\u0432 \u043D\u0435 \u0442\u0440\u043E\u0433\u0430\u0435\u0442.").addButton((button) => button.setButtonText("\u0421\u0431\u0440\u043E\u0441\u0438\u0442\u044C").setWarning().onClick(async () => {
+      const agreed = await confirm(
+        this.app,
+        "\u0421\u0431\u0440\u043E\u0441\u0438\u0442\u044C \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043A\u0443?",
+        "\u0421\u0447\u0451\u0442 \u043F\u043E \u0432\u0441\u0435\u043C \u0443\u0440\u043E\u0432\u043D\u044F\u043C \u0431\u0443\u0434\u0435\u0442 \u0441\u0442\u0451\u0440\u0442, \u0432\u0435\u0440\u043D\u0443\u0442\u044C \u0435\u0433\u043E \u0431\u0443\u0434\u0435\u0442 \u043D\u0435\u043E\u0442\u043A\u0443\u0434\u0430.",
+        "\u0421\u0431\u0440\u043E\u0441\u0438\u0442\u044C"
+      );
+      if (!agreed)
+        return;
+      this.plugin.settings.levelStats = {};
+      await this.plugin.saveSettings();
+      this.display();
     }));
   }
 };
@@ -3564,26 +3762,52 @@ var Chess = class {
 var workerUrl = null;
 function ensureWorkerUrl() {
   if (!workerUrl) {
-    const blob = new Blob(['(() => {\n  var __defProp = Object.defineProperty;\n  var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;\n  var __publicField = (obj, key, value) => {\n    __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);\n    return value;\n  };\n\n  // node_modules/chess.js/dist/esm/chess.js\n  function rootNode(comment) {\n    return comment !== null ? { comment, variations: [] } : { variations: [] };\n  }\n  function node(move, suffix, nag, comment, variations) {\n    const node2 = { move, variations };\n    if (suffix) {\n      node2.suffix = suffix;\n    }\n    if (nag) {\n      node2.nag = nag;\n    }\n    if (comment !== null) {\n      node2.comment = comment;\n    }\n    return node2;\n  }\n  function lineToTree(...nodes) {\n    const [root, ...rest] = nodes;\n    let parent = root;\n    for (const child of rest) {\n      if (child !== null) {\n        parent.variations = [child, ...child.variations];\n        child.variations = [];\n        parent = child;\n      }\n    }\n    return root;\n  }\n  function pgn(headers, game) {\n    if (game.marker && game.marker.comment) {\n      let node2 = game.root;\n      while (true) {\n        const next = node2.variations[0];\n        if (!next) {\n          node2.comment = game.marker.comment;\n          break;\n        }\n        node2 = next;\n      }\n    }\n    return {\n      headers,\n      root: game.root,\n      result: (game.marker && game.marker.result) ?? void 0\n    };\n  }\n  function peg$subclass(child, parent) {\n    function C() {\n      this.constructor = child;\n    }\n    C.prototype = parent.prototype;\n    child.prototype = new C();\n  }\n  function peg$SyntaxError(message, expected, found, location) {\n    var self2 = Error.call(this, message);\n    if (Object.setPrototypeOf) {\n      Object.setPrototypeOf(self2, peg$SyntaxError.prototype);\n    }\n    self2.expected = expected;\n    self2.found = found;\n    self2.location = location;\n    self2.name = "SyntaxError";\n    return self2;\n  }\n  peg$subclass(peg$SyntaxError, Error);\n  function peg$padEnd(str, targetLength, padString) {\n    padString = padString || " ";\n    if (str.length > targetLength) {\n      return str;\n    }\n    targetLength -= str.length;\n    padString += padString.repeat(targetLength);\n    return str + padString.slice(0, targetLength);\n  }\n  peg$SyntaxError.prototype.format = function(sources) {\n    var str = "Error: " + this.message;\n    if (this.location) {\n      var src = null;\n      var k;\n      for (k = 0; k < sources.length; k++) {\n        if (sources[k].source === this.location.source) {\n          src = sources[k].text.split(/\\r\\n|\\n|\\r/g);\n          break;\n        }\n      }\n      var s = this.location.start;\n      var offset_s = this.location.source && typeof this.location.source.offset === "function" ? this.location.source.offset(s) : s;\n      var loc = this.location.source + ":" + offset_s.line + ":" + offset_s.column;\n      if (src) {\n        var e = this.location.end;\n        var filler = peg$padEnd("", offset_s.line.toString().length, " ");\n        var line = src[s.line - 1];\n        var last = s.line === e.line ? e.column : line.length + 1;\n        var hatLen = last - s.column || 1;\n        str += "\\n --> " + loc + "\\n" + filler + " |\\n" + offset_s.line + " | " + line + "\\n" + filler + " | " + peg$padEnd("", s.column - 1, " ") + peg$padEnd("", hatLen, "^");\n      } else {\n        str += "\\n at " + loc;\n      }\n    }\n    return str;\n  };\n  peg$SyntaxError.buildMessage = function(expected, found) {\n    var DESCRIBE_EXPECTATION_FNS = {\n      literal: function(expectation) {\n        return \'"\' + literalEscape(expectation.text) + \'"\';\n      },\n      class: function(expectation) {\n        var escapedParts = expectation.parts.map(function(part) {\n          return Array.isArray(part) ? classEscape(part[0]) + "-" + classEscape(part[1]) : classEscape(part);\n        });\n        return "[" + (expectation.inverted ? "^" : "") + escapedParts.join("") + "]";\n      },\n      any: function() {\n        return "any character";\n      },\n      end: function() {\n        return "end of input";\n      },\n      other: function(expectation) {\n        return expectation.description;\n      }\n    };\n    function hex(ch) {\n      return ch.charCodeAt(0).toString(16).toUpperCase();\n    }\n    function literalEscape(s) {\n      return s.replace(/\\\\/g, "\\\\\\\\").replace(/"/g, \'\\\\"\').replace(/\\0/g, "\\\\0").replace(/\\t/g, "\\\\t").replace(/\\n/g, "\\\\n").replace(/\\r/g, "\\\\r").replace(/[\\x00-\\x0F]/g, function(ch) {\n        return "\\\\x0" + hex(ch);\n      }).replace(/[\\x10-\\x1F\\x7F-\\x9F]/g, function(ch) {\n        return "\\\\x" + hex(ch);\n      });\n    }\n    function classEscape(s) {\n      return s.replace(/\\\\/g, "\\\\\\\\").replace(/\\]/g, "\\\\]").replace(/\\^/g, "\\\\^").replace(/-/g, "\\\\-").replace(/\\0/g, "\\\\0").replace(/\\t/g, "\\\\t").replace(/\\n/g, "\\\\n").replace(/\\r/g, "\\\\r").replace(/[\\x00-\\x0F]/g, function(ch) {\n        return "\\\\x0" + hex(ch);\n      }).replace(/[\\x10-\\x1F\\x7F-\\x9F]/g, function(ch) {\n        return "\\\\x" + hex(ch);\n      });\n    }\n    function describeExpectation(expectation) {\n      return DESCRIBE_EXPECTATION_FNS[expectation.type](expectation);\n    }\n    function describeExpected(expected2) {\n      var descriptions = expected2.map(describeExpectation);\n      var i, j;\n      descriptions.sort();\n      if (descriptions.length > 0) {\n        for (i = 1, j = 1; i < descriptions.length; i++) {\n          if (descriptions[i - 1] !== descriptions[i]) {\n            descriptions[j] = descriptions[i];\n            j++;\n          }\n        }\n        descriptions.length = j;\n      }\n      switch (descriptions.length) {\n        case 1:\n          return descriptions[0];\n        case 2:\n          return descriptions[0] + " or " + descriptions[1];\n        default:\n          return descriptions.slice(0, -1).join(", ") + ", or " + descriptions[descriptions.length - 1];\n      }\n    }\n    function describeFound(found2) {\n      return found2 ? \'"\' + literalEscape(found2) + \'"\' : "end of input";\n    }\n    return "Expected " + describeExpected(expected) + " but " + describeFound(found) + " found.";\n  };\n  function peg$parse(input, options) {\n    options = options !== void 0 ? options : {};\n    var peg$FAILED = {};\n    var peg$source = options.grammarSource;\n    var peg$startRuleFunctions = { pgn: peg$parsepgn };\n    var peg$startRuleFunction = peg$parsepgn;\n    var peg$c0 = "[";\n    var peg$c1 = \'"\';\n    var peg$c2 = "]";\n    var peg$c3 = ".";\n    var peg$c4 = "O-O-O";\n    var peg$c5 = "O-O";\n    var peg$c6 = "0-0-0";\n    var peg$c7 = "0-0";\n    var peg$c8 = "$";\n    var peg$c9 = "{";\n    var peg$c10 = "}";\n    var peg$c11 = ";";\n    var peg$c12 = "(";\n    var peg$c13 = ")";\n    var peg$c14 = "1-0";\n    var peg$c15 = "0-1";\n    var peg$c16 = "1/2-1/2";\n    var peg$c17 = "*";\n    var peg$r0 = /^[a-zA-Z]/;\n    var peg$r1 = /^[^"]/;\n    var peg$r2 = /^[0-9]/;\n    var peg$r3 = /^[.]/;\n    var peg$r4 = /^[a-zA-Z1-8\\-=]/;\n    var peg$r5 = /^[+#]/;\n    var peg$r6 = /^[!?]/;\n    var peg$r7 = /^[^}]/;\n    var peg$r8 = /^[^\\r\\n]/;\n    var peg$r9 = /^[ \\t\\r\\n]/;\n    var peg$e0 = peg$otherExpectation("tag pair");\n    var peg$e1 = peg$literalExpectation("[", false);\n    var peg$e2 = peg$literalExpectation(\'"\', false);\n    var peg$e3 = peg$literalExpectation("]", false);\n    var peg$e4 = peg$otherExpectation("tag name");\n    var peg$e5 = peg$classExpectation([["a", "z"], ["A", "Z"]], false, false);\n    var peg$e6 = peg$otherExpectation("tag value");\n    var peg$e7 = peg$classExpectation([\'"\'], true, false);\n    var peg$e8 = peg$otherExpectation("move number");\n    var peg$e9 = peg$classExpectation([["0", "9"]], false, false);\n    var peg$e10 = peg$literalExpectation(".", false);\n    var peg$e11 = peg$classExpectation(["."], false, false);\n    var peg$e12 = peg$otherExpectation("standard algebraic notation");\n    var peg$e13 = peg$literalExpectation("O-O-O", false);\n    var peg$e14 = peg$literalExpectation("O-O", false);\n    var peg$e15 = peg$literalExpectation("0-0-0", false);\n    var peg$e16 = peg$literalExpectation("0-0", false);\n    var peg$e17 = peg$classExpectation([["a", "z"], ["A", "Z"], ["1", "8"], "-", "="], false, false);\n    var peg$e18 = peg$classExpectation(["+", "#"], false, false);\n    var peg$e19 = peg$otherExpectation("suffix annotation");\n    var peg$e20 = peg$classExpectation(["!", "?"], false, false);\n    var peg$e21 = peg$otherExpectation("NAG");\n    var peg$e22 = peg$literalExpectation("$", false);\n    var peg$e23 = peg$otherExpectation("brace comment");\n    var peg$e24 = peg$literalExpectation("{", false);\n    var peg$e25 = peg$classExpectation(["}"], true, false);\n    var peg$e26 = peg$literalExpectation("}", false);\n    var peg$e27 = peg$otherExpectation("rest of line comment");\n    var peg$e28 = peg$literalExpectation(";", false);\n    var peg$e29 = peg$classExpectation(["\\r", "\\n"], true, false);\n    var peg$e30 = peg$otherExpectation("variation");\n    var peg$e31 = peg$literalExpectation("(", false);\n    var peg$e32 = peg$literalExpectation(")", false);\n    var peg$e33 = peg$otherExpectation("game termination marker");\n    var peg$e34 = peg$literalExpectation("1-0", false);\n    var peg$e35 = peg$literalExpectation("0-1", false);\n    var peg$e36 = peg$literalExpectation("1/2-1/2", false);\n    var peg$e37 = peg$literalExpectation("*", false);\n    var peg$e38 = peg$otherExpectation("whitespace");\n    var peg$e39 = peg$classExpectation([" ", "	", "\\r", "\\n"], false, false);\n    var peg$f0 = function(headers, game) {\n      return pgn(headers, game);\n    };\n    var peg$f1 = function(tagPairs) {\n      return Object.fromEntries(tagPairs);\n    };\n    var peg$f2 = function(tagName, tagValue) {\n      return [tagName, tagValue];\n    };\n    var peg$f3 = function(root, marker) {\n      return { root, marker };\n    };\n    var peg$f4 = function(comment, moves) {\n      return lineToTree(rootNode(comment), ...moves.flat());\n    };\n    var peg$f5 = function(san, suffix, nag, comment, variations) {\n      return node(san, suffix, nag, comment, variations);\n    };\n    var peg$f6 = function(nag) {\n      return nag;\n    };\n    var peg$f7 = function(comment) {\n      return comment.replace(/[\\r\\n]+/g, " ");\n    };\n    var peg$f8 = function(comment) {\n      return comment.trim();\n    };\n    var peg$f9 = function(line) {\n      return line;\n    };\n    var peg$f10 = function(result, comment) {\n      return { result, comment };\n    };\n    var peg$currPos = options.peg$currPos | 0;\n    var peg$posDetailsCache = [{ line: 1, column: 1 }];\n    var peg$maxFailPos = peg$currPos;\n    var peg$maxFailExpected = options.peg$maxFailExpected || [];\n    var peg$silentFails = options.peg$silentFails | 0;\n    var peg$result;\n    if (options.startRule) {\n      if (!(options.startRule in peg$startRuleFunctions)) {\n        throw new Error(`Can\'t start parsing from rule "` + options.startRule + \'".\');\n      }\n      peg$startRuleFunction = peg$startRuleFunctions[options.startRule];\n    }\n    function peg$literalExpectation(text, ignoreCase) {\n      return { type: "literal", text, ignoreCase };\n    }\n    function peg$classExpectation(parts, inverted, ignoreCase) {\n      return { type: "class", parts, inverted, ignoreCase };\n    }\n    function peg$endExpectation() {\n      return { type: "end" };\n    }\n    function peg$otherExpectation(description) {\n      return { type: "other", description };\n    }\n    function peg$computePosDetails(pos) {\n      var details = peg$posDetailsCache[pos];\n      var p;\n      if (details) {\n        return details;\n      } else {\n        if (pos >= peg$posDetailsCache.length) {\n          p = peg$posDetailsCache.length - 1;\n        } else {\n          p = pos;\n          while (!peg$posDetailsCache[--p]) {\n          }\n        }\n        details = peg$posDetailsCache[p];\n        details = {\n          line: details.line,\n          column: details.column\n        };\n        while (p < pos) {\n          if (input.charCodeAt(p) === 10) {\n            details.line++;\n            details.column = 1;\n          } else {\n            details.column++;\n          }\n          p++;\n        }\n        peg$posDetailsCache[pos] = details;\n        return details;\n      }\n    }\n    function peg$computeLocation(startPos, endPos, offset) {\n      var startPosDetails = peg$computePosDetails(startPos);\n      var endPosDetails = peg$computePosDetails(endPos);\n      var res = {\n        source: peg$source,\n        start: {\n          offset: startPos,\n          line: startPosDetails.line,\n          column: startPosDetails.column\n        },\n        end: {\n          offset: endPos,\n          line: endPosDetails.line,\n          column: endPosDetails.column\n        }\n      };\n      return res;\n    }\n    function peg$fail(expected) {\n      if (peg$currPos < peg$maxFailPos) {\n        return;\n      }\n      if (peg$currPos > peg$maxFailPos) {\n        peg$maxFailPos = peg$currPos;\n        peg$maxFailExpected = [];\n      }\n      peg$maxFailExpected.push(expected);\n    }\n    function peg$buildStructuredError(expected, found, location) {\n      return new peg$SyntaxError(\n        peg$SyntaxError.buildMessage(expected, found),\n        expected,\n        found,\n        location\n      );\n    }\n    function peg$parsepgn() {\n      var s0, s1, s2;\n      s0 = peg$currPos;\n      s1 = peg$parsetagPairSection();\n      s2 = peg$parsemoveTextSection();\n      s0 = peg$f0(s1, s2);\n      return s0;\n    }\n    function peg$parsetagPairSection() {\n      var s0, s1, s2;\n      s0 = peg$currPos;\n      s1 = [];\n      s2 = peg$parsetagPair();\n      while (s2 !== peg$FAILED) {\n        s1.push(s2);\n        s2 = peg$parsetagPair();\n      }\n      s2 = peg$parse_();\n      s0 = peg$f1(s1);\n      return s0;\n    }\n    function peg$parsetagPair() {\n      var s0, s2, s4, s6, s7, s8, s10;\n      peg$silentFails++;\n      s0 = peg$currPos;\n      peg$parse_();\n      if (input.charCodeAt(peg$currPos) === 91) {\n        s2 = peg$c0;\n        peg$currPos++;\n      } else {\n        s2 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e1);\n        }\n      }\n      if (s2 !== peg$FAILED) {\n        peg$parse_();\n        s4 = peg$parsetagName();\n        if (s4 !== peg$FAILED) {\n          peg$parse_();\n          if (input.charCodeAt(peg$currPos) === 34) {\n            s6 = peg$c1;\n            peg$currPos++;\n          } else {\n            s6 = peg$FAILED;\n            if (peg$silentFails === 0) {\n              peg$fail(peg$e2);\n            }\n          }\n          if (s6 !== peg$FAILED) {\n            s7 = peg$parsetagValue();\n            if (input.charCodeAt(peg$currPos) === 34) {\n              s8 = peg$c1;\n              peg$currPos++;\n            } else {\n              s8 = peg$FAILED;\n              if (peg$silentFails === 0) {\n                peg$fail(peg$e2);\n              }\n            }\n            if (s8 !== peg$FAILED) {\n              peg$parse_();\n              if (input.charCodeAt(peg$currPos) === 93) {\n                s10 = peg$c2;\n                peg$currPos++;\n              } else {\n                s10 = peg$FAILED;\n                if (peg$silentFails === 0) {\n                  peg$fail(peg$e3);\n                }\n              }\n              if (s10 !== peg$FAILED) {\n                s0 = peg$f2(s4, s7);\n              } else {\n                peg$currPos = s0;\n                s0 = peg$FAILED;\n              }\n            } else {\n              peg$currPos = s0;\n              s0 = peg$FAILED;\n            }\n          } else {\n            peg$currPos = s0;\n            s0 = peg$FAILED;\n          }\n        } else {\n          peg$currPos = s0;\n          s0 = peg$FAILED;\n        }\n      } else {\n        peg$currPos = s0;\n        s0 = peg$FAILED;\n      }\n      peg$silentFails--;\n      if (s0 === peg$FAILED) {\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e0);\n        }\n      }\n      return s0;\n    }\n    function peg$parsetagName() {\n      var s0, s1, s2;\n      peg$silentFails++;\n      s0 = peg$currPos;\n      s1 = [];\n      s2 = input.charAt(peg$currPos);\n      if (peg$r0.test(s2)) {\n        peg$currPos++;\n      } else {\n        s2 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e5);\n        }\n      }\n      if (s2 !== peg$FAILED) {\n        while (s2 !== peg$FAILED) {\n          s1.push(s2);\n          s2 = input.charAt(peg$currPos);\n          if (peg$r0.test(s2)) {\n            peg$currPos++;\n          } else {\n            s2 = peg$FAILED;\n            if (peg$silentFails === 0) {\n              peg$fail(peg$e5);\n            }\n          }\n        }\n      } else {\n        s1 = peg$FAILED;\n      }\n      if (s1 !== peg$FAILED) {\n        s0 = input.substring(s0, peg$currPos);\n      } else {\n        s0 = s1;\n      }\n      peg$silentFails--;\n      if (s0 === peg$FAILED) {\n        s1 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e4);\n        }\n      }\n      return s0;\n    }\n    function peg$parsetagValue() {\n      var s0, s1, s2;\n      peg$silentFails++;\n      s0 = peg$currPos;\n      s1 = [];\n      s2 = input.charAt(peg$currPos);\n      if (peg$r1.test(s2)) {\n        peg$currPos++;\n      } else {\n        s2 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e7);\n        }\n      }\n      while (s2 !== peg$FAILED) {\n        s1.push(s2);\n        s2 = input.charAt(peg$currPos);\n        if (peg$r1.test(s2)) {\n          peg$currPos++;\n        } else {\n          s2 = peg$FAILED;\n          if (peg$silentFails === 0) {\n            peg$fail(peg$e7);\n          }\n        }\n      }\n      s0 = input.substring(s0, peg$currPos);\n      peg$silentFails--;\n      s1 = peg$FAILED;\n      if (peg$silentFails === 0) {\n        peg$fail(peg$e6);\n      }\n      return s0;\n    }\n    function peg$parsemoveTextSection() {\n      var s0, s1, s3;\n      s0 = peg$currPos;\n      s1 = peg$parseline();\n      peg$parse_();\n      s3 = peg$parsegameTerminationMarker();\n      if (s3 === peg$FAILED) {\n        s3 = null;\n      }\n      peg$parse_();\n      s0 = peg$f3(s1, s3);\n      return s0;\n    }\n    function peg$parseline() {\n      var s0, s1, s2, s3;\n      s0 = peg$currPos;\n      s1 = peg$parsecomment();\n      if (s1 === peg$FAILED) {\n        s1 = null;\n      }\n      s2 = [];\n      s3 = peg$parsemove();\n      while (s3 !== peg$FAILED) {\n        s2.push(s3);\n        s3 = peg$parsemove();\n      }\n      s0 = peg$f4(s1, s2);\n      return s0;\n    }\n    function peg$parsemove() {\n      var s0, s4, s5, s6, s7, s8, s9, s10;\n      s0 = peg$currPos;\n      peg$parse_();\n      peg$parsemoveNumber();\n      peg$parse_();\n      s4 = peg$parsesan();\n      if (s4 !== peg$FAILED) {\n        s5 = peg$parsesuffixAnnotation();\n        if (s5 === peg$FAILED) {\n          s5 = null;\n        }\n        s6 = [];\n        s7 = peg$parsenag();\n        while (s7 !== peg$FAILED) {\n          s6.push(s7);\n          s7 = peg$parsenag();\n        }\n        s7 = peg$parse_();\n        s8 = peg$parsecomment();\n        if (s8 === peg$FAILED) {\n          s8 = null;\n        }\n        s9 = [];\n        s10 = peg$parsevariation();\n        while (s10 !== peg$FAILED) {\n          s9.push(s10);\n          s10 = peg$parsevariation();\n        }\n        s0 = peg$f5(s4, s5, s6, s8, s9);\n      } else {\n        peg$currPos = s0;\n        s0 = peg$FAILED;\n      }\n      return s0;\n    }\n    function peg$parsemoveNumber() {\n      var s0, s1, s2, s3, s4, s5;\n      peg$silentFails++;\n      s0 = peg$currPos;\n      s1 = [];\n      s2 = input.charAt(peg$currPos);\n      if (peg$r2.test(s2)) {\n        peg$currPos++;\n      } else {\n        s2 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e9);\n        }\n      }\n      while (s2 !== peg$FAILED) {\n        s1.push(s2);\n        s2 = input.charAt(peg$currPos);\n        if (peg$r2.test(s2)) {\n          peg$currPos++;\n        } else {\n          s2 = peg$FAILED;\n          if (peg$silentFails === 0) {\n            peg$fail(peg$e9);\n          }\n        }\n      }\n      if (input.charCodeAt(peg$currPos) === 46) {\n        s2 = peg$c3;\n        peg$currPos++;\n      } else {\n        s2 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e10);\n        }\n      }\n      if (s2 !== peg$FAILED) {\n        s3 = peg$parse_();\n        s4 = [];\n        s5 = input.charAt(peg$currPos);\n        if (peg$r3.test(s5)) {\n          peg$currPos++;\n        } else {\n          s5 = peg$FAILED;\n          if (peg$silentFails === 0) {\n            peg$fail(peg$e11);\n          }\n        }\n        while (s5 !== peg$FAILED) {\n          s4.push(s5);\n          s5 = input.charAt(peg$currPos);\n          if (peg$r3.test(s5)) {\n            peg$currPos++;\n          } else {\n            s5 = peg$FAILED;\n            if (peg$silentFails === 0) {\n              peg$fail(peg$e11);\n            }\n          }\n        }\n        s1 = [s1, s2, s3, s4];\n        s0 = s1;\n      } else {\n        peg$currPos = s0;\n        s0 = peg$FAILED;\n      }\n      peg$silentFails--;\n      if (s0 === peg$FAILED) {\n        s1 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e8);\n        }\n      }\n      return s0;\n    }\n    function peg$parsesan() {\n      var s0, s1, s2, s3, s4, s5;\n      peg$silentFails++;\n      s0 = peg$currPos;\n      s1 = peg$currPos;\n      if (input.substr(peg$currPos, 5) === peg$c4) {\n        s2 = peg$c4;\n        peg$currPos += 5;\n      } else {\n        s2 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e13);\n        }\n      }\n      if (s2 === peg$FAILED) {\n        if (input.substr(peg$currPos, 3) === peg$c5) {\n          s2 = peg$c5;\n          peg$currPos += 3;\n        } else {\n          s2 = peg$FAILED;\n          if (peg$silentFails === 0) {\n            peg$fail(peg$e14);\n          }\n        }\n        if (s2 === peg$FAILED) {\n          if (input.substr(peg$currPos, 5) === peg$c6) {\n            s2 = peg$c6;\n            peg$currPos += 5;\n          } else {\n            s2 = peg$FAILED;\n            if (peg$silentFails === 0) {\n              peg$fail(peg$e15);\n            }\n          }\n          if (s2 === peg$FAILED) {\n            if (input.substr(peg$currPos, 3) === peg$c7) {\n              s2 = peg$c7;\n              peg$currPos += 3;\n            } else {\n              s2 = peg$FAILED;\n              if (peg$silentFails === 0) {\n                peg$fail(peg$e16);\n              }\n            }\n            if (s2 === peg$FAILED) {\n              s2 = peg$currPos;\n              s3 = input.charAt(peg$currPos);\n              if (peg$r0.test(s3)) {\n                peg$currPos++;\n              } else {\n                s3 = peg$FAILED;\n                if (peg$silentFails === 0) {\n                  peg$fail(peg$e5);\n                }\n              }\n              if (s3 !== peg$FAILED) {\n                s4 = [];\n                s5 = input.charAt(peg$currPos);\n                if (peg$r4.test(s5)) {\n                  peg$currPos++;\n                } else {\n                  s5 = peg$FAILED;\n                  if (peg$silentFails === 0) {\n                    peg$fail(peg$e17);\n                  }\n                }\n                if (s5 !== peg$FAILED) {\n                  while (s5 !== peg$FAILED) {\n                    s4.push(s5);\n                    s5 = input.charAt(peg$currPos);\n                    if (peg$r4.test(s5)) {\n                      peg$currPos++;\n                    } else {\n                      s5 = peg$FAILED;\n                      if (peg$silentFails === 0) {\n                        peg$fail(peg$e17);\n                      }\n                    }\n                  }\n                } else {\n                  s4 = peg$FAILED;\n                }\n                if (s4 !== peg$FAILED) {\n                  s3 = [s3, s4];\n                  s2 = s3;\n                } else {\n                  peg$currPos = s2;\n                  s2 = peg$FAILED;\n                }\n              } else {\n                peg$currPos = s2;\n                s2 = peg$FAILED;\n              }\n            }\n          }\n        }\n      }\n      if (s2 !== peg$FAILED) {\n        s3 = input.charAt(peg$currPos);\n        if (peg$r5.test(s3)) {\n          peg$currPos++;\n        } else {\n          s3 = peg$FAILED;\n          if (peg$silentFails === 0) {\n            peg$fail(peg$e18);\n          }\n        }\n        if (s3 === peg$FAILED) {\n          s3 = null;\n        }\n        s2 = [s2, s3];\n        s1 = s2;\n      } else {\n        peg$currPos = s1;\n        s1 = peg$FAILED;\n      }\n      if (s1 !== peg$FAILED) {\n        s0 = input.substring(s0, peg$currPos);\n      } else {\n        s0 = s1;\n      }\n      peg$silentFails--;\n      if (s0 === peg$FAILED) {\n        s1 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e12);\n        }\n      }\n      return s0;\n    }\n    function peg$parsesuffixAnnotation() {\n      var s0, s1, s2;\n      peg$silentFails++;\n      s0 = peg$currPos;\n      s1 = [];\n      s2 = input.charAt(peg$currPos);\n      if (peg$r6.test(s2)) {\n        peg$currPos++;\n      } else {\n        s2 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e20);\n        }\n      }\n      while (s2 !== peg$FAILED) {\n        s1.push(s2);\n        if (s1.length >= 2) {\n          s2 = peg$FAILED;\n        } else {\n          s2 = input.charAt(peg$currPos);\n          if (peg$r6.test(s2)) {\n            peg$currPos++;\n          } else {\n            s2 = peg$FAILED;\n            if (peg$silentFails === 0) {\n              peg$fail(peg$e20);\n            }\n          }\n        }\n      }\n      if (s1.length < 1) {\n        peg$currPos = s0;\n        s0 = peg$FAILED;\n      } else {\n        s0 = s1;\n      }\n      peg$silentFails--;\n      if (s0 === peg$FAILED) {\n        s1 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e19);\n        }\n      }\n      return s0;\n    }\n    function peg$parsenag() {\n      var s0, s2, s3, s4, s5;\n      peg$silentFails++;\n      s0 = peg$currPos;\n      peg$parse_();\n      if (input.charCodeAt(peg$currPos) === 36) {\n        s2 = peg$c8;\n        peg$currPos++;\n      } else {\n        s2 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e22);\n        }\n      }\n      if (s2 !== peg$FAILED) {\n        s3 = peg$currPos;\n        s4 = [];\n        s5 = input.charAt(peg$currPos);\n        if (peg$r2.test(s5)) {\n          peg$currPos++;\n        } else {\n          s5 = peg$FAILED;\n          if (peg$silentFails === 0) {\n            peg$fail(peg$e9);\n          }\n        }\n        if (s5 !== peg$FAILED) {\n          while (s5 !== peg$FAILED) {\n            s4.push(s5);\n            s5 = input.charAt(peg$currPos);\n            if (peg$r2.test(s5)) {\n              peg$currPos++;\n            } else {\n              s5 = peg$FAILED;\n              if (peg$silentFails === 0) {\n                peg$fail(peg$e9);\n              }\n            }\n          }\n        } else {\n          s4 = peg$FAILED;\n        }\n        if (s4 !== peg$FAILED) {\n          s3 = input.substring(s3, peg$currPos);\n        } else {\n          s3 = s4;\n        }\n        if (s3 !== peg$FAILED) {\n          s0 = peg$f6(s3);\n        } else {\n          peg$currPos = s0;\n          s0 = peg$FAILED;\n        }\n      } else {\n        peg$currPos = s0;\n        s0 = peg$FAILED;\n      }\n      peg$silentFails--;\n      if (s0 === peg$FAILED) {\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e21);\n        }\n      }\n      return s0;\n    }\n    function peg$parsecomment() {\n      var s0;\n      s0 = peg$parsebraceComment();\n      if (s0 === peg$FAILED) {\n        s0 = peg$parserestOfLineComment();\n      }\n      return s0;\n    }\n    function peg$parsebraceComment() {\n      var s0, s1, s2, s3, s4;\n      peg$silentFails++;\n      s0 = peg$currPos;\n      if (input.charCodeAt(peg$currPos) === 123) {\n        s1 = peg$c9;\n        peg$currPos++;\n      } else {\n        s1 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e24);\n        }\n      }\n      if (s1 !== peg$FAILED) {\n        s2 = peg$currPos;\n        s3 = [];\n        s4 = input.charAt(peg$currPos);\n        if (peg$r7.test(s4)) {\n          peg$currPos++;\n        } else {\n          s4 = peg$FAILED;\n          if (peg$silentFails === 0) {\n            peg$fail(peg$e25);\n          }\n        }\n        while (s4 !== peg$FAILED) {\n          s3.push(s4);\n          s4 = input.charAt(peg$currPos);\n          if (peg$r7.test(s4)) {\n            peg$currPos++;\n          } else {\n            s4 = peg$FAILED;\n            if (peg$silentFails === 0) {\n              peg$fail(peg$e25);\n            }\n          }\n        }\n        s2 = input.substring(s2, peg$currPos);\n        if (input.charCodeAt(peg$currPos) === 125) {\n          s3 = peg$c10;\n          peg$currPos++;\n        } else {\n          s3 = peg$FAILED;\n          if (peg$silentFails === 0) {\n            peg$fail(peg$e26);\n          }\n        }\n        if (s3 !== peg$FAILED) {\n          s0 = peg$f7(s2);\n        } else {\n          peg$currPos = s0;\n          s0 = peg$FAILED;\n        }\n      } else {\n        peg$currPos = s0;\n        s0 = peg$FAILED;\n      }\n      peg$silentFails--;\n      if (s0 === peg$FAILED) {\n        s1 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e23);\n        }\n      }\n      return s0;\n    }\n    function peg$parserestOfLineComment() {\n      var s0, s1, s2, s3, s4;\n      peg$silentFails++;\n      s0 = peg$currPos;\n      if (input.charCodeAt(peg$currPos) === 59) {\n        s1 = peg$c11;\n        peg$currPos++;\n      } else {\n        s1 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e28);\n        }\n      }\n      if (s1 !== peg$FAILED) {\n        s2 = peg$currPos;\n        s3 = [];\n        s4 = input.charAt(peg$currPos);\n        if (peg$r8.test(s4)) {\n          peg$currPos++;\n        } else {\n          s4 = peg$FAILED;\n          if (peg$silentFails === 0) {\n            peg$fail(peg$e29);\n          }\n        }\n        while (s4 !== peg$FAILED) {\n          s3.push(s4);\n          s4 = input.charAt(peg$currPos);\n          if (peg$r8.test(s4)) {\n            peg$currPos++;\n          } else {\n            s4 = peg$FAILED;\n            if (peg$silentFails === 0) {\n              peg$fail(peg$e29);\n            }\n          }\n        }\n        s2 = input.substring(s2, peg$currPos);\n        s0 = peg$f8(s2);\n      } else {\n        peg$currPos = s0;\n        s0 = peg$FAILED;\n      }\n      peg$silentFails--;\n      if (s0 === peg$FAILED) {\n        s1 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e27);\n        }\n      }\n      return s0;\n    }\n    function peg$parsevariation() {\n      var s0, s2, s3, s5;\n      peg$silentFails++;\n      s0 = peg$currPos;\n      peg$parse_();\n      if (input.charCodeAt(peg$currPos) === 40) {\n        s2 = peg$c12;\n        peg$currPos++;\n      } else {\n        s2 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e31);\n        }\n      }\n      if (s2 !== peg$FAILED) {\n        s3 = peg$parseline();\n        if (s3 !== peg$FAILED) {\n          peg$parse_();\n          if (input.charCodeAt(peg$currPos) === 41) {\n            s5 = peg$c13;\n            peg$currPos++;\n          } else {\n            s5 = peg$FAILED;\n            if (peg$silentFails === 0) {\n              peg$fail(peg$e32);\n            }\n          }\n          if (s5 !== peg$FAILED) {\n            s0 = peg$f9(s3);\n          } else {\n            peg$currPos = s0;\n            s0 = peg$FAILED;\n          }\n        } else {\n          peg$currPos = s0;\n          s0 = peg$FAILED;\n        }\n      } else {\n        peg$currPos = s0;\n        s0 = peg$FAILED;\n      }\n      peg$silentFails--;\n      if (s0 === peg$FAILED) {\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e30);\n        }\n      }\n      return s0;\n    }\n    function peg$parsegameTerminationMarker() {\n      var s0, s1, s3;\n      peg$silentFails++;\n      s0 = peg$currPos;\n      if (input.substr(peg$currPos, 3) === peg$c14) {\n        s1 = peg$c14;\n        peg$currPos += 3;\n      } else {\n        s1 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e34);\n        }\n      }\n      if (s1 === peg$FAILED) {\n        if (input.substr(peg$currPos, 3) === peg$c15) {\n          s1 = peg$c15;\n          peg$currPos += 3;\n        } else {\n          s1 = peg$FAILED;\n          if (peg$silentFails === 0) {\n            peg$fail(peg$e35);\n          }\n        }\n        if (s1 === peg$FAILED) {\n          if (input.substr(peg$currPos, 7) === peg$c16) {\n            s1 = peg$c16;\n            peg$currPos += 7;\n          } else {\n            s1 = peg$FAILED;\n            if (peg$silentFails === 0) {\n              peg$fail(peg$e36);\n            }\n          }\n          if (s1 === peg$FAILED) {\n            if (input.charCodeAt(peg$currPos) === 42) {\n              s1 = peg$c17;\n              peg$currPos++;\n            } else {\n              s1 = peg$FAILED;\n              if (peg$silentFails === 0) {\n                peg$fail(peg$e37);\n              }\n            }\n          }\n        }\n      }\n      if (s1 !== peg$FAILED) {\n        peg$parse_();\n        s3 = peg$parsecomment();\n        if (s3 === peg$FAILED) {\n          s3 = null;\n        }\n        s0 = peg$f10(s1, s3);\n      } else {\n        peg$currPos = s0;\n        s0 = peg$FAILED;\n      }\n      peg$silentFails--;\n      if (s0 === peg$FAILED) {\n        s1 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e33);\n        }\n      }\n      return s0;\n    }\n    function peg$parse_() {\n      var s0, s1;\n      peg$silentFails++;\n      s0 = [];\n      s1 = input.charAt(peg$currPos);\n      if (peg$r9.test(s1)) {\n        peg$currPos++;\n      } else {\n        s1 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e39);\n        }\n      }\n      while (s1 !== peg$FAILED) {\n        s0.push(s1);\n        s1 = input.charAt(peg$currPos);\n        if (peg$r9.test(s1)) {\n          peg$currPos++;\n        } else {\n          s1 = peg$FAILED;\n          if (peg$silentFails === 0) {\n            peg$fail(peg$e39);\n          }\n        }\n      }\n      peg$silentFails--;\n      s1 = peg$FAILED;\n      if (peg$silentFails === 0) {\n        peg$fail(peg$e38);\n      }\n      return s0;\n    }\n    peg$result = peg$startRuleFunction();\n    if (options.peg$library) {\n      return (\n        /** @type {any} */\n        {\n          peg$result,\n          peg$currPos,\n          peg$FAILED,\n          peg$maxFailExpected,\n          peg$maxFailPos\n        }\n      );\n    }\n    if (peg$result !== peg$FAILED && peg$currPos === input.length) {\n      return peg$result;\n    } else {\n      if (peg$result !== peg$FAILED && peg$currPos < input.length) {\n        peg$fail(peg$endExpectation());\n      }\n      throw peg$buildStructuredError(\n        peg$maxFailExpected,\n        peg$maxFailPos < input.length ? input.charAt(peg$maxFailPos) : null,\n        peg$maxFailPos < input.length ? peg$computeLocation(peg$maxFailPos, peg$maxFailPos + 1) : peg$computeLocation(peg$maxFailPos, peg$maxFailPos)\n      );\n    }\n  }\n  var MASK64 = 0xffffffffffffffffn;\n  function rotl(x, k) {\n    return (x << k | x >> 64n - k) & 0xffffffffffffffffn;\n  }\n  function wrappingMul(x, y) {\n    return x * y & MASK64;\n  }\n  function xoroshiro128(state) {\n    return function() {\n      let s0 = BigInt(state & MASK64);\n      let s1 = BigInt(state >> 64n & MASK64);\n      const result = wrappingMul(rotl(wrappingMul(s0, 5n), 7n), 9n);\n      s1 ^= s0;\n      s0 = (rotl(s0, 24n) ^ s1 ^ s1 << 16n) & MASK64;\n      s1 = rotl(s1, 37n);\n      state = s1 << 64n | s0;\n      return result;\n    };\n  }\n  var rand = xoroshiro128(0xa187eb39cdcaed8f31c4b365b102e01en);\n  var PIECE_KEYS = Array.from({ length: 2 }, () => Array.from({ length: 6 }, () => Array.from({ length: 128 }, () => rand())));\n  var EP_KEYS = Array.from({ length: 8 }, () => rand());\n  var CASTLING_KEYS = Array.from({ length: 16 }, () => rand());\n  var SIDE_KEY = rand();\n  var WHITE = "w";\n  var BLACK = "b";\n  var PAWN = "p";\n  var KNIGHT = "n";\n  var BISHOP = "b";\n  var ROOK = "r";\n  var QUEEN = "q";\n  var KING = "k";\n  var DEFAULT_POSITION = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";\n  var Move = class {\n    constructor(chess, internal) {\n      __publicField(this, "color");\n      __publicField(this, "from");\n      __publicField(this, "to");\n      __publicField(this, "piece");\n      __publicField(this, "captured");\n      __publicField(this, "promotion");\n      /**\n       * @deprecated This field is deprecated and will be removed in version 2.0.0.\n       * Please use move descriptor functions instead: `isCapture`, `isPromotion`,\n       * `isEnPassant`, `isKingsideCastle`, `isQueensideCastle`, `isCastle`, and\n       * `isBigPawn`\n       */\n      __publicField(this, "flags");\n      __publicField(this, "san");\n      __publicField(this, "lan");\n      __publicField(this, "before");\n      __publicField(this, "after");\n      const { color, piece, from, to, flags, captured, promotion } = internal;\n      const fromAlgebraic = algebraic(from);\n      const toAlgebraic = algebraic(to);\n      this.color = color;\n      this.piece = piece;\n      this.from = fromAlgebraic;\n      this.to = toAlgebraic;\n      this.san = chess["_moveToSan"](internal, chess["_moves"]({ legal: true }));\n      this.lan = fromAlgebraic + toAlgebraic;\n      this.before = chess.fen();\n      chess["_makeMove"](internal);\n      this.after = chess.fen();\n      chess["_undoMove"]();\n      this.flags = "";\n      for (const flag in BITS) {\n        if (BITS[flag] & flags) {\n          this.flags += FLAGS[flag];\n        }\n      }\n      if (captured) {\n        this.captured = captured;\n      }\n      if (promotion) {\n        this.promotion = promotion;\n        this.lan += promotion;\n      }\n    }\n    isCapture() {\n      return this.flags.indexOf(FLAGS["CAPTURE"]) > -1;\n    }\n    isPromotion() {\n      return this.flags.indexOf(FLAGS["PROMOTION"]) > -1;\n    }\n    isEnPassant() {\n      return this.flags.indexOf(FLAGS["EP_CAPTURE"]) > -1;\n    }\n    isKingsideCastle() {\n      return this.flags.indexOf(FLAGS["KSIDE_CASTLE"]) > -1;\n    }\n    isQueensideCastle() {\n      return this.flags.indexOf(FLAGS["QSIDE_CASTLE"]) > -1;\n    }\n    isBigPawn() {\n      return this.flags.indexOf(FLAGS["BIG_PAWN"]) > -1;\n    }\n  };\n  var EMPTY = -1;\n  var FLAGS = {\n    NORMAL: "n",\n    CAPTURE: "c",\n    BIG_PAWN: "b",\n    EP_CAPTURE: "e",\n    PROMOTION: "p",\n    KSIDE_CASTLE: "k",\n    QSIDE_CASTLE: "q",\n    NULL_MOVE: "-"\n  };\n  var BITS = {\n    NORMAL: 1,\n    CAPTURE: 2,\n    BIG_PAWN: 4,\n    EP_CAPTURE: 8,\n    PROMOTION: 16,\n    KSIDE_CASTLE: 32,\n    QSIDE_CASTLE: 64,\n    NULL_MOVE: 128\n  };\n  var SEVEN_TAG_ROSTER = {\n    Event: "?",\n    Site: "?",\n    Date: "????.??.??",\n    Round: "?",\n    White: "?",\n    Black: "?",\n    Result: "*"\n  };\n  var SUPLEMENTAL_TAGS = {\n    WhiteTitle: null,\n    BlackTitle: null,\n    WhiteElo: null,\n    BlackElo: null,\n    WhiteUSCF: null,\n    BlackUSCF: null,\n    WhiteNA: null,\n    BlackNA: null,\n    WhiteType: null,\n    BlackType: null,\n    EventDate: null,\n    EventSponsor: null,\n    Section: null,\n    Stage: null,\n    Board: null,\n    Opening: null,\n    Variation: null,\n    SubVariation: null,\n    ECO: null,\n    NIC: null,\n    Time: null,\n    UTCTime: null,\n    UTCDate: null,\n    TimeControl: null,\n    SetUp: null,\n    FEN: null,\n    Termination: null,\n    Annotator: null,\n    Mode: null,\n    PlyCount: null\n  };\n  var HEADER_TEMPLATE = {\n    ...SEVEN_TAG_ROSTER,\n    ...SUPLEMENTAL_TAGS\n  };\n  var Ox88 = {\n    a8: 0,\n    b8: 1,\n    c8: 2,\n    d8: 3,\n    e8: 4,\n    f8: 5,\n    g8: 6,\n    h8: 7,\n    a7: 16,\n    b7: 17,\n    c7: 18,\n    d7: 19,\n    e7: 20,\n    f7: 21,\n    g7: 22,\n    h7: 23,\n    a6: 32,\n    b6: 33,\n    c6: 34,\n    d6: 35,\n    e6: 36,\n    f6: 37,\n    g6: 38,\n    h6: 39,\n    a5: 48,\n    b5: 49,\n    c5: 50,\n    d5: 51,\n    e5: 52,\n    f5: 53,\n    g5: 54,\n    h5: 55,\n    a4: 64,\n    b4: 65,\n    c4: 66,\n    d4: 67,\n    e4: 68,\n    f4: 69,\n    g4: 70,\n    h4: 71,\n    a3: 80,\n    b3: 81,\n    c3: 82,\n    d3: 83,\n    e3: 84,\n    f3: 85,\n    g3: 86,\n    h3: 87,\n    a2: 96,\n    b2: 97,\n    c2: 98,\n    d2: 99,\n    e2: 100,\n    f2: 101,\n    g2: 102,\n    h2: 103,\n    a1: 112,\n    b1: 113,\n    c1: 114,\n    d1: 115,\n    e1: 116,\n    f1: 117,\n    g1: 118,\n    h1: 119\n  };\n  var PAWN_OFFSETS = {\n    b: [16, 32, 17, 15],\n    w: [-16, -32, -17, -15]\n  };\n  var PIECE_OFFSETS = {\n    n: [-18, -33, -31, -14, 18, 33, 31, 14],\n    b: [-17, -15, 17, 15],\n    r: [-16, 1, 16, -1],\n    q: [-17, -16, -15, 1, 17, 16, 15, -1],\n    k: [-17, -16, -15, 1, 17, 16, 15, -1]\n  };\n  var ATTACKS = [\n    20,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    24,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    0,\n    24,\n    0,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    24,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    24,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    24,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    20,\n    2,\n    24,\n    2,\n    20,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    2,\n    53,\n    56,\n    53,\n    2,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    24,\n    24,\n    24,\n    24,\n    24,\n    24,\n    56,\n    0,\n    56,\n    24,\n    24,\n    24,\n    24,\n    24,\n    24,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    2,\n    53,\n    56,\n    53,\n    2,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    20,\n    2,\n    24,\n    2,\n    20,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    24,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    24,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    24,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    0,\n    24,\n    0,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    24,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    20\n  ];\n  var RAYS = [\n    17,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    16,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    15,\n    0,\n    0,\n    17,\n    0,\n    0,\n    0,\n    0,\n    0,\n    16,\n    0,\n    0,\n    0,\n    0,\n    0,\n    15,\n    0,\n    0,\n    0,\n    0,\n    17,\n    0,\n    0,\n    0,\n    0,\n    16,\n    0,\n    0,\n    0,\n    0,\n    15,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    17,\n    0,\n    0,\n    0,\n    16,\n    0,\n    0,\n    0,\n    15,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    17,\n    0,\n    0,\n    16,\n    0,\n    0,\n    15,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    17,\n    0,\n    16,\n    0,\n    15,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    17,\n    16,\n    15,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    1,\n    1,\n    1,\n    1,\n    1,\n    1,\n    1,\n    0,\n    -1,\n    -1,\n    -1,\n    -1,\n    -1,\n    -1,\n    -1,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    -15,\n    -16,\n    -17,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    -15,\n    0,\n    -16,\n    0,\n    -17,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    -15,\n    0,\n    0,\n    -16,\n    0,\n    0,\n    -17,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    -15,\n    0,\n    0,\n    0,\n    -16,\n    0,\n    0,\n    0,\n    -17,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    -15,\n    0,\n    0,\n    0,\n    0,\n    -16,\n    0,\n    0,\n    0,\n    0,\n    -17,\n    0,\n    0,\n    0,\n    0,\n    -15,\n    0,\n    0,\n    0,\n    0,\n    0,\n    -16,\n    0,\n    0,\n    0,\n    0,\n    0,\n    -17,\n    0,\n    0,\n    -15,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    -16,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    -17\n  ];\n  var PIECE_MASKS = { p: 1, n: 2, b: 4, r: 8, q: 16, k: 32 };\n  var SYMBOLS = "pnbrqkPNBRQK";\n  var PROMOTIONS = [KNIGHT, BISHOP, ROOK, QUEEN];\n  var RANK_1 = 7;\n  var RANK_2 = 6;\n  var RANK_7 = 1;\n  var RANK_8 = 0;\n  var SIDES = {\n    [KING]: BITS.KSIDE_CASTLE,\n    [QUEEN]: BITS.QSIDE_CASTLE\n  };\n  var ROOKS = {\n    w: [\n      { square: Ox88.a1, flag: BITS.QSIDE_CASTLE },\n      { square: Ox88.h1, flag: BITS.KSIDE_CASTLE }\n    ],\n    b: [\n      { square: Ox88.a8, flag: BITS.QSIDE_CASTLE },\n      { square: Ox88.h8, flag: BITS.KSIDE_CASTLE }\n    ]\n  };\n  var SECOND_RANK = { b: RANK_7, w: RANK_2 };\n  var SAN_NULLMOVE = "--";\n  function rank(square) {\n    return square >> 4;\n  }\n  function file(square) {\n    return square & 15;\n  }\n  function isDigit(c) {\n    return "0123456789".indexOf(c) !== -1;\n  }\n  function algebraic(square) {\n    const f = file(square);\n    const r = rank(square);\n    return "abcdefgh".substring(f, f + 1) + "87654321".substring(r, r + 1);\n  }\n  function swapColor(color) {\n    return color === WHITE ? BLACK : WHITE;\n  }\n  function validateFen(fen) {\n    const tokens = fen.split(/\\s+/);\n    if (tokens.length !== 6) {\n      return {\n        ok: false,\n        error: "Invalid FEN: must contain six space-delimited fields"\n      };\n    }\n    const moveNumber = parseInt(tokens[5], 10);\n    if (isNaN(moveNumber) || moveNumber <= 0) {\n      return {\n        ok: false,\n        error: "Invalid FEN: move number must be a positive integer"\n      };\n    }\n    const halfMoves = parseInt(tokens[4], 10);\n    if (isNaN(halfMoves) || halfMoves < 0) {\n      return {\n        ok: false,\n        error: "Invalid FEN: half move counter number must be a non-negative integer"\n      };\n    }\n    if (!/^(-|[abcdefgh][36])$/.test(tokens[3])) {\n      return { ok: false, error: "Invalid FEN: en-passant square is invalid" };\n    }\n    if (/[^kKqQ-]/.test(tokens[2])) {\n      return { ok: false, error: "Invalid FEN: castling availability is invalid" };\n    }\n    if (!/^(w|b)$/.test(tokens[1])) {\n      return { ok: false, error: "Invalid FEN: side-to-move is invalid" };\n    }\n    const rows = tokens[0].split("/");\n    if (rows.length !== 8) {\n      return {\n        ok: false,\n        error: "Invalid FEN: piece data does not contain 8 \'/\'-delimited rows"\n      };\n    }\n    for (let i = 0; i < rows.length; i++) {\n      let sumFields = 0;\n      let previousWasNumber = false;\n      for (let k = 0; k < rows[i].length; k++) {\n        if (isDigit(rows[i][k])) {\n          if (previousWasNumber) {\n            return {\n              ok: false,\n              error: "Invalid FEN: piece data is invalid (consecutive number)"\n            };\n          }\n          sumFields += parseInt(rows[i][k], 10);\n          previousWasNumber = true;\n        } else {\n          if (!/^[prnbqkPRNBQK]$/.test(rows[i][k])) {\n            return {\n              ok: false,\n              error: "Invalid FEN: piece data is invalid (invalid piece)"\n            };\n          }\n          sumFields += 1;\n          previousWasNumber = false;\n        }\n      }\n      if (sumFields !== 8) {\n        return {\n          ok: false,\n          error: "Invalid FEN: piece data is invalid (too many squares in rank)"\n        };\n      }\n    }\n    if (tokens[3][1] == "3" && tokens[1] == "w" || tokens[3][1] == "6" && tokens[1] == "b") {\n      return { ok: false, error: "Invalid FEN: illegal en-passant square" };\n    }\n    const kings = [\n      { color: "white", regex: /K/g },\n      { color: "black", regex: /k/g }\n    ];\n    for (const { color, regex } of kings) {\n      if (!regex.test(tokens[0])) {\n        return { ok: false, error: `Invalid FEN: missing ${color} king` };\n      }\n      if ((tokens[0].match(regex) || []).length > 1) {\n        return { ok: false, error: `Invalid FEN: too many ${color} kings` };\n      }\n    }\n    if (Array.from(rows[0] + rows[7]).some((char) => char.toUpperCase() === "P")) {\n      return {\n        ok: false,\n        error: "Invalid FEN: some pawns are on the edge rows"\n      };\n    }\n    return { ok: true };\n  }\n  function getDisambiguator(move, moves) {\n    const from = move.from;\n    const to = move.to;\n    const piece = move.piece;\n    let ambiguities = 0;\n    let sameRank = 0;\n    let sameFile = 0;\n    for (let i = 0, len = moves.length; i < len; i++) {\n      const ambigFrom = moves[i].from;\n      const ambigTo = moves[i].to;\n      const ambigPiece = moves[i].piece;\n      if (piece === ambigPiece && from !== ambigFrom && to === ambigTo) {\n        ambiguities++;\n        if (rank(from) === rank(ambigFrom)) {\n          sameRank++;\n        }\n        if (file(from) === file(ambigFrom)) {\n          sameFile++;\n        }\n      }\n    }\n    if (ambiguities > 0) {\n      if (sameRank > 0 && sameFile > 0) {\n        return algebraic(from);\n      } else if (sameFile > 0) {\n        return algebraic(from).charAt(1);\n      } else {\n        return algebraic(from).charAt(0);\n      }\n    }\n    return "";\n  }\n  function addMove(moves, color, from, to, piece, captured = void 0, flags = BITS.NORMAL) {\n    const r = rank(to);\n    if (piece === PAWN && (r === RANK_1 || r === RANK_8)) {\n      for (let i = 0; i < PROMOTIONS.length; i++) {\n        const promotion = PROMOTIONS[i];\n        moves.push({\n          color,\n          from,\n          to,\n          piece,\n          captured,\n          promotion,\n          flags: flags | BITS.PROMOTION\n        });\n      }\n    } else {\n      moves.push({\n        color,\n        from,\n        to,\n        piece,\n        captured,\n        flags\n      });\n    }\n  }\n  function inferPieceType(san) {\n    let pieceType = san.charAt(0);\n    if (pieceType >= "a" && pieceType <= "h") {\n      const matches = san.match(/[a-h]\\d.*[a-h]\\d/);\n      if (matches) {\n        return void 0;\n      }\n      return PAWN;\n    }\n    pieceType = pieceType.toLowerCase();\n    if (pieceType === "o") {\n      return KING;\n    }\n    return pieceType;\n  }\n  function strippedSan(move) {\n    return move.replace(/=/, "").replace(/[+#]?[?!]*$/, "");\n  }\n  var Chess = class {\n    constructor(fen = DEFAULT_POSITION, { skipValidation = false } = {}) {\n      __publicField(this, "_board", new Array(128));\n      __publicField(this, "_turn", WHITE);\n      __publicField(this, "_header", {});\n      __publicField(this, "_kings", { w: EMPTY, b: EMPTY });\n      __publicField(this, "_epSquare", -1);\n      __publicField(this, "_halfMoves", 0);\n      __publicField(this, "_moveNumber", 0);\n      __publicField(this, "_history", []);\n      __publicField(this, "_comments", {});\n      __publicField(this, "_castling", { w: 0, b: 0 });\n      __publicField(this, "_hash", 0n);\n      // tracks number of times a position has been seen for repetition checking\n      __publicField(this, "_positionCount", /* @__PURE__ */ new Map());\n      this.load(fen, { skipValidation });\n    }\n    clear({ preserveHeaders = false } = {}) {\n      this._board = new Array(128);\n      this._kings = { w: EMPTY, b: EMPTY };\n      this._turn = WHITE;\n      this._castling = { w: 0, b: 0 };\n      this._epSquare = EMPTY;\n      this._halfMoves = 0;\n      this._moveNumber = 1;\n      this._history = [];\n      this._comments = {};\n      this._header = preserveHeaders ? this._header : { ...HEADER_TEMPLATE };\n      this._hash = this._computeHash();\n      this._positionCount = /* @__PURE__ */ new Map();\n      this._header["SetUp"] = null;\n      this._header["FEN"] = null;\n    }\n    load(fen, { skipValidation = false, preserveHeaders = false } = {}) {\n      let tokens = fen.split(/\\s+/);\n      if (tokens.length >= 2 && tokens.length < 6) {\n        const adjustments = ["-", "-", "0", "1"];\n        fen = tokens.concat(adjustments.slice(-(6 - tokens.length))).join(" ");\n      }\n      tokens = fen.split(/\\s+/);\n      if (!skipValidation) {\n        const { ok, error } = validateFen(fen);\n        if (!ok) {\n          throw new Error(error);\n        }\n      }\n      const position = tokens[0];\n      let square = 0;\n      this.clear({ preserveHeaders });\n      for (let i = 0; i < position.length; i++) {\n        const piece = position.charAt(i);\n        if (piece === "/") {\n          square += 8;\n        } else if (isDigit(piece)) {\n          square += parseInt(piece, 10);\n        } else {\n          const color = piece < "a" ? WHITE : BLACK;\n          this._put({ type: piece.toLowerCase(), color }, algebraic(square));\n          square++;\n        }\n      }\n      this._turn = tokens[1];\n      if (tokens[2].indexOf("K") > -1) {\n        this._castling.w |= BITS.KSIDE_CASTLE;\n      }\n      if (tokens[2].indexOf("Q") > -1) {\n        this._castling.w |= BITS.QSIDE_CASTLE;\n      }\n      if (tokens[2].indexOf("k") > -1) {\n        this._castling.b |= BITS.KSIDE_CASTLE;\n      }\n      if (tokens[2].indexOf("q") > -1) {\n        this._castling.b |= BITS.QSIDE_CASTLE;\n      }\n      this._epSquare = tokens[3] === "-" ? EMPTY : Ox88[tokens[3]];\n      this._halfMoves = parseInt(tokens[4], 10);\n      this._moveNumber = parseInt(tokens[5], 10);\n      this._hash = this._computeHash();\n      this._updateSetup(fen);\n      this._incPositionCount();\n    }\n    fen({ forceEnpassantSquare = false } = {}) {\n      let empty = 0;\n      let fen = "";\n      for (let i = Ox88.a8; i <= Ox88.h1; i++) {\n        if (this._board[i]) {\n          if (empty > 0) {\n            fen += empty;\n            empty = 0;\n          }\n          const { color, type: piece } = this._board[i];\n          fen += color === WHITE ? piece.toUpperCase() : piece.toLowerCase();\n        } else {\n          empty++;\n        }\n        if (i + 1 & 136) {\n          if (empty > 0) {\n            fen += empty;\n          }\n          if (i !== Ox88.h1) {\n            fen += "/";\n          }\n          empty = 0;\n          i += 8;\n        }\n      }\n      let castling = "";\n      if (this._castling[WHITE] & BITS.KSIDE_CASTLE) {\n        castling += "K";\n      }\n      if (this._castling[WHITE] & BITS.QSIDE_CASTLE) {\n        castling += "Q";\n      }\n      if (this._castling[BLACK] & BITS.KSIDE_CASTLE) {\n        castling += "k";\n      }\n      if (this._castling[BLACK] & BITS.QSIDE_CASTLE) {\n        castling += "q";\n      }\n      castling = castling || "-";\n      let epSquare = "-";\n      if (this._epSquare !== EMPTY) {\n        if (forceEnpassantSquare) {\n          epSquare = algebraic(this._epSquare);\n        } else {\n          const bigPawnSquare = this._epSquare + (this._turn === WHITE ? 16 : -16);\n          const squares = [bigPawnSquare + 1, bigPawnSquare - 1];\n          for (const square of squares) {\n            if (square & 136) {\n              continue;\n            }\n            const color = this._turn;\n            if (this._board[square]?.color === color && this._board[square]?.type === PAWN) {\n              this._makeMove({\n                color,\n                from: square,\n                to: this._epSquare,\n                piece: PAWN,\n                captured: PAWN,\n                flags: BITS.EP_CAPTURE\n              });\n              const isLegal = !this._isKingAttacked(color);\n              this._undoMove();\n              if (isLegal) {\n                epSquare = algebraic(this._epSquare);\n                break;\n              }\n            }\n          }\n        }\n      }\n      return [\n        fen,\n        this._turn,\n        castling,\n        epSquare,\n        this._halfMoves,\n        this._moveNumber\n      ].join(" ");\n    }\n    _pieceKey(i) {\n      if (!this._board[i]) {\n        return 0n;\n      }\n      const { color, type } = this._board[i];\n      const colorIndex = {\n        w: 0,\n        b: 1\n      }[color];\n      const typeIndex = {\n        p: 0,\n        n: 1,\n        b: 2,\n        r: 3,\n        q: 4,\n        k: 5\n      }[type];\n      return PIECE_KEYS[colorIndex][typeIndex][i];\n    }\n    _epKey() {\n      return this._epSquare === EMPTY ? 0n : EP_KEYS[this._epSquare & 7];\n    }\n    _castlingKey() {\n      const index = this._castling.w >> 5 | this._castling.b >> 3;\n      return CASTLING_KEYS[index];\n    }\n    _computeHash() {\n      let hash = 0n;\n      for (let i = Ox88.a8; i <= Ox88.h1; i++) {\n        if (i & 136) {\n          i += 7;\n          continue;\n        }\n        if (this._board[i]) {\n          hash ^= this._pieceKey(i);\n        }\n      }\n      hash ^= this._epKey();\n      hash ^= this._castlingKey();\n      if (this._turn === "b") {\n        hash ^= SIDE_KEY;\n      }\n      return hash;\n    }\n    /*\n     * Called when the initial board setup is changed with put() or remove().\n     * modifies the SetUp and FEN properties of the header object. If the FEN\n     * is equal to the default position, the SetUp and FEN are deleted the setup\n     * is only updated if history.length is zero, ie moves haven\'t been made.\n     */\n    _updateSetup(fen) {\n      if (this._history.length > 0)\n        return;\n      if (fen !== DEFAULT_POSITION) {\n        this._header["SetUp"] = "1";\n        this._header["FEN"] = fen;\n      } else {\n        this._header["SetUp"] = null;\n        this._header["FEN"] = null;\n      }\n    }\n    reset() {\n      this.load(DEFAULT_POSITION);\n    }\n    get(square) {\n      return this._board[Ox88[square]];\n    }\n    findPiece(piece) {\n      const squares = [];\n      for (let i = Ox88.a8; i <= Ox88.h1; i++) {\n        if (i & 136) {\n          i += 7;\n          continue;\n        }\n        if (!this._board[i] || this._board[i]?.color !== piece.color) {\n          continue;\n        }\n        if (this._board[i].color === piece.color && this._board[i].type === piece.type) {\n          squares.push(algebraic(i));\n        }\n      }\n      return squares;\n    }\n    put({ type, color }, square) {\n      if (this._put({ type, color }, square)) {\n        this._updateCastlingRights();\n        this._updateEnPassantSquare();\n        this._updateSetup(this.fen());\n        return true;\n      }\n      return false;\n    }\n    _set(sq, piece) {\n      this._hash ^= this._pieceKey(sq);\n      this._board[sq] = piece;\n      this._hash ^= this._pieceKey(sq);\n    }\n    _put({ type, color }, square) {\n      if (SYMBOLS.indexOf(type.toLowerCase()) === -1) {\n        return false;\n      }\n      if (!(square in Ox88)) {\n        return false;\n      }\n      const sq = Ox88[square];\n      if (type == KING && !(this._kings[color] == EMPTY || this._kings[color] == sq)) {\n        return false;\n      }\n      const currentPieceOnSquare = this._board[sq];\n      if (currentPieceOnSquare && currentPieceOnSquare.type === KING) {\n        this._kings[currentPieceOnSquare.color] = EMPTY;\n      }\n      this._set(sq, { type, color });\n      if (type === KING) {\n        this._kings[color] = sq;\n      }\n      return true;\n    }\n    _clear(sq) {\n      this._hash ^= this._pieceKey(sq);\n      delete this._board[sq];\n    }\n    remove(square) {\n      const piece = this.get(square);\n      this._clear(Ox88[square]);\n      if (piece && piece.type === KING) {\n        this._kings[piece.color] = EMPTY;\n      }\n      this._updateCastlingRights();\n      this._updateEnPassantSquare();\n      this._updateSetup(this.fen());\n      return piece;\n    }\n    _updateCastlingRights() {\n      this._hash ^= this._castlingKey();\n      const whiteKingInPlace = this._board[Ox88.e1]?.type === KING && this._board[Ox88.e1]?.color === WHITE;\n      const blackKingInPlace = this._board[Ox88.e8]?.type === KING && this._board[Ox88.e8]?.color === BLACK;\n      if (!whiteKingInPlace || this._board[Ox88.a1]?.type !== ROOK || this._board[Ox88.a1]?.color !== WHITE) {\n        this._castling.w &= -65;\n      }\n      if (!whiteKingInPlace || this._board[Ox88.h1]?.type !== ROOK || this._board[Ox88.h1]?.color !== WHITE) {\n        this._castling.w &= -33;\n      }\n      if (!blackKingInPlace || this._board[Ox88.a8]?.type !== ROOK || this._board[Ox88.a8]?.color !== BLACK) {\n        this._castling.b &= -65;\n      }\n      if (!blackKingInPlace || this._board[Ox88.h8]?.type !== ROOK || this._board[Ox88.h8]?.color !== BLACK) {\n        this._castling.b &= -33;\n      }\n      this._hash ^= this._castlingKey();\n    }\n    _updateEnPassantSquare() {\n      if (this._epSquare === EMPTY) {\n        return;\n      }\n      const startSquare = this._epSquare + (this._turn === WHITE ? -16 : 16);\n      const currentSquare = this._epSquare + (this._turn === WHITE ? 16 : -16);\n      const attackers = [currentSquare + 1, currentSquare - 1];\n      if (this._board[startSquare] !== null || this._board[this._epSquare] !== null || this._board[currentSquare]?.color !== swapColor(this._turn) || this._board[currentSquare]?.type !== PAWN) {\n        this._hash ^= this._epKey();\n        this._epSquare = EMPTY;\n        return;\n      }\n      const canCapture = (square) => !(square & 136) && this._board[square]?.color === this._turn && this._board[square]?.type === PAWN;\n      if (!attackers.some(canCapture)) {\n        this._hash ^= this._epKey();\n        this._epSquare = EMPTY;\n      }\n    }\n    _attacked(color, square, verbose) {\n      const attackers = [];\n      for (let i = Ox88.a8; i <= Ox88.h1; i++) {\n        if (i & 136) {\n          i += 7;\n          continue;\n        }\n        if (this._board[i] === void 0 || this._board[i].color !== color) {\n          continue;\n        }\n        const piece = this._board[i];\n        const difference = i - square;\n        if (difference === 0) {\n          continue;\n        }\n        const index = difference + 119;\n        if (ATTACKS[index] & PIECE_MASKS[piece.type]) {\n          if (piece.type === PAWN) {\n            if (difference > 0 && piece.color === WHITE || difference <= 0 && piece.color === BLACK) {\n              if (!verbose) {\n                return true;\n              } else {\n                attackers.push(algebraic(i));\n              }\n            }\n            continue;\n          }\n          if (piece.type === "n" || piece.type === "k") {\n            if (!verbose) {\n              return true;\n            } else {\n              attackers.push(algebraic(i));\n              continue;\n            }\n          }\n          const offset = RAYS[index];\n          let j = i + offset;\n          let blocked = false;\n          while (j !== square) {\n            if (this._board[j] != null) {\n              blocked = true;\n              break;\n            }\n            j += offset;\n          }\n          if (!blocked) {\n            if (!verbose) {\n              return true;\n            } else {\n              attackers.push(algebraic(i));\n              continue;\n            }\n          }\n        }\n      }\n      if (verbose) {\n        return attackers;\n      } else {\n        return false;\n      }\n    }\n    attackers(square, attackedBy) {\n      if (!attackedBy) {\n        return this._attacked(this._turn, Ox88[square], true);\n      } else {\n        return this._attacked(attackedBy, Ox88[square], true);\n      }\n    }\n    _isKingAttacked(color) {\n      const square = this._kings[color];\n      return square === -1 ? false : this._attacked(swapColor(color), square);\n    }\n    hash() {\n      return this._hash.toString(16);\n    }\n    isAttacked(square, attackedBy) {\n      return this._attacked(attackedBy, Ox88[square]);\n    }\n    isCheck() {\n      return this._isKingAttacked(this._turn);\n    }\n    inCheck() {\n      return this.isCheck();\n    }\n    isCheckmate() {\n      return this.isCheck() && this._moves().length === 0;\n    }\n    isStalemate() {\n      return !this.isCheck() && this._moves().length === 0;\n    }\n    isInsufficientMaterial() {\n      const pieces = {\n        b: 0,\n        n: 0,\n        r: 0,\n        q: 0,\n        k: 0,\n        p: 0\n      };\n      const bishops = [];\n      let numPieces = 0;\n      let squareColor = 0;\n      for (let i = Ox88.a8; i <= Ox88.h1; i++) {\n        squareColor = (squareColor + 1) % 2;\n        if (i & 136) {\n          i += 7;\n          continue;\n        }\n        const piece = this._board[i];\n        if (piece) {\n          pieces[piece.type] = piece.type in pieces ? pieces[piece.type] + 1 : 1;\n          if (piece.type === BISHOP) {\n            bishops.push(squareColor);\n          }\n          numPieces++;\n        }\n      }\n      if (numPieces === 2) {\n        return true;\n      } else if (\n        // k vs. kn .... or .... k vs. kb\n        numPieces === 3 && (pieces[BISHOP] === 1 || pieces[KNIGHT] === 1)\n      ) {\n        return true;\n      } else if (numPieces === pieces[BISHOP] + 2) {\n        let sum = 0;\n        const len = bishops.length;\n        for (let i = 0; i < len; i++) {\n          sum += bishops[i];\n        }\n        if (sum === 0 || sum === len) {\n          return true;\n        }\n      }\n      return false;\n    }\n    isThreefoldRepetition() {\n      return this._getPositionCount(this._hash) >= 3;\n    }\n    isDrawByFiftyMoves() {\n      return this._halfMoves >= 100;\n    }\n    isDraw() {\n      return this.isDrawByFiftyMoves() || this.isStalemate() || this.isInsufficientMaterial() || this.isThreefoldRepetition();\n    }\n    isGameOver() {\n      return this.isCheckmate() || this.isDraw();\n    }\n    moves({ verbose = false, square = void 0, piece = void 0 } = {}) {\n      const moves = this._moves({ square, piece });\n      if (verbose) {\n        return moves.map((move) => new Move(this, move));\n      } else {\n        return moves.map((move) => this._moveToSan(move, moves));\n      }\n    }\n    _moves({ legal = true, piece = void 0, square = void 0 } = {}) {\n      const forSquare = square ? square.toLowerCase() : void 0;\n      const forPiece = piece?.toLowerCase();\n      const moves = [];\n      const us = this._turn;\n      const them = swapColor(us);\n      let firstSquare = Ox88.a8;\n      let lastSquare = Ox88.h1;\n      let singleSquare = false;\n      if (forSquare) {\n        if (!(forSquare in Ox88)) {\n          return [];\n        } else {\n          firstSquare = lastSquare = Ox88[forSquare];\n          singleSquare = true;\n        }\n      }\n      for (let from = firstSquare; from <= lastSquare; from++) {\n        if (from & 136) {\n          from += 7;\n          continue;\n        }\n        if (!this._board[from] || this._board[from].color === them) {\n          continue;\n        }\n        const { type } = this._board[from];\n        let to;\n        if (type === PAWN) {\n          if (forPiece && forPiece !== type)\n            continue;\n          to = from + PAWN_OFFSETS[us][0];\n          if (!this._board[to]) {\n            addMove(moves, us, from, to, PAWN);\n            to = from + PAWN_OFFSETS[us][1];\n            if (SECOND_RANK[us] === rank(from) && !this._board[to]) {\n              addMove(moves, us, from, to, PAWN, void 0, BITS.BIG_PAWN);\n            }\n          }\n          for (let j = 2; j < 4; j++) {\n            to = from + PAWN_OFFSETS[us][j];\n            if (to & 136)\n              continue;\n            if (this._board[to]?.color === them) {\n              addMove(moves, us, from, to, PAWN, this._board[to].type, BITS.CAPTURE);\n            } else if (to === this._epSquare) {\n              addMove(moves, us, from, to, PAWN, PAWN, BITS.EP_CAPTURE);\n            }\n          }\n        } else {\n          if (forPiece && forPiece !== type)\n            continue;\n          for (let j = 0, len = PIECE_OFFSETS[type].length; j < len; j++) {\n            const offset = PIECE_OFFSETS[type][j];\n            to = from;\n            while (true) {\n              to += offset;\n              if (to & 136)\n                break;\n              if (!this._board[to]) {\n                addMove(moves, us, from, to, type);\n              } else {\n                if (this._board[to].color === us)\n                  break;\n                addMove(moves, us, from, to, type, this._board[to].type, BITS.CAPTURE);\n                break;\n              }\n              if (type === KNIGHT || type === KING)\n                break;\n            }\n          }\n        }\n      }\n      if (forPiece === void 0 || forPiece === KING) {\n        if (!singleSquare || lastSquare === this._kings[us]) {\n          if (this._castling[us] & BITS.KSIDE_CASTLE) {\n            const castlingFrom = this._kings[us];\n            const castlingTo = castlingFrom + 2;\n            if (!this._board[castlingFrom + 1] && !this._board[castlingTo] && !this._attacked(them, this._kings[us]) && !this._attacked(them, castlingFrom + 1) && !this._attacked(them, castlingTo)) {\n              addMove(moves, us, this._kings[us], castlingTo, KING, void 0, BITS.KSIDE_CASTLE);\n            }\n          }\n          if (this._castling[us] & BITS.QSIDE_CASTLE) {\n            const castlingFrom = this._kings[us];\n            const castlingTo = castlingFrom - 2;\n            if (!this._board[castlingFrom - 1] && !this._board[castlingFrom - 2] && !this._board[castlingFrom - 3] && !this._attacked(them, this._kings[us]) && !this._attacked(them, castlingFrom - 1) && !this._attacked(them, castlingTo)) {\n              addMove(moves, us, this._kings[us], castlingTo, KING, void 0, BITS.QSIDE_CASTLE);\n            }\n          }\n        }\n      }\n      if (!legal || this._kings[us] === -1) {\n        return moves;\n      }\n      const legalMoves = [];\n      for (let i = 0, len = moves.length; i < len; i++) {\n        this._makeMove(moves[i]);\n        if (!this._isKingAttacked(us)) {\n          legalMoves.push(moves[i]);\n        }\n        this._undoMove();\n      }\n      return legalMoves;\n    }\n    move(move, { strict = false } = {}) {\n      let moveObj = null;\n      if (typeof move === "string") {\n        moveObj = this._moveFromSan(move, strict);\n      } else if (move === null) {\n        moveObj = this._moveFromSan(SAN_NULLMOVE, strict);\n      } else if (typeof move === "object") {\n        const moves = this._moves();\n        for (let i = 0, len = moves.length; i < len; i++) {\n          if (move.from === algebraic(moves[i].from) && move.to === algebraic(moves[i].to) && (!("promotion" in moves[i]) || move.promotion === moves[i].promotion)) {\n            moveObj = moves[i];\n            break;\n          }\n        }\n      }\n      if (!moveObj) {\n        if (typeof move === "string") {\n          throw new Error(`Invalid move: ${move}`);\n        } else {\n          throw new Error(`Invalid move: ${JSON.stringify(move)}`);\n        }\n      }\n      if (this.isCheck() && moveObj.flags & BITS.NULL_MOVE) {\n        throw new Error("Null move not allowed when in check");\n      }\n      const prettyMove = new Move(this, moveObj);\n      this._makeMove(moveObj);\n      this._incPositionCount();\n      return prettyMove;\n    }\n    _push(move) {\n      this._history.push({\n        move,\n        kings: { b: this._kings.b, w: this._kings.w },\n        turn: this._turn,\n        castling: { b: this._castling.b, w: this._castling.w },\n        epSquare: this._epSquare,\n        halfMoves: this._halfMoves,\n        moveNumber: this._moveNumber\n      });\n    }\n    _movePiece(from, to) {\n      this._hash ^= this._pieceKey(from);\n      this._board[to] = this._board[from];\n      delete this._board[from];\n      this._hash ^= this._pieceKey(to);\n    }\n    _makeMove(move) {\n      const us = this._turn;\n      const them = swapColor(us);\n      this._push(move);\n      if (move.flags & BITS.NULL_MOVE) {\n        if (us === BLACK) {\n          this._moveNumber++;\n        }\n        this._halfMoves++;\n        this._turn = them;\n        this._epSquare = EMPTY;\n        return;\n      }\n      this._hash ^= this._epKey();\n      this._hash ^= this._castlingKey();\n      if (move.captured) {\n        this._hash ^= this._pieceKey(move.to);\n      }\n      this._movePiece(move.from, move.to);\n      if (move.flags & BITS.EP_CAPTURE) {\n        if (this._turn === BLACK) {\n          this._clear(move.to - 16);\n        } else {\n          this._clear(move.to + 16);\n        }\n      }\n      if (move.promotion) {\n        this._clear(move.to);\n        this._set(move.to, { type: move.promotion, color: us });\n      }\n      if (this._board[move.to].type === KING) {\n        this._kings[us] = move.to;\n        if (move.flags & BITS.KSIDE_CASTLE) {\n          const castlingTo = move.to - 1;\n          const castlingFrom = move.to + 1;\n          this._movePiece(castlingFrom, castlingTo);\n        } else if (move.flags & BITS.QSIDE_CASTLE) {\n          const castlingTo = move.to + 1;\n          const castlingFrom = move.to - 2;\n          this._movePiece(castlingFrom, castlingTo);\n        }\n        this._castling[us] = 0;\n      }\n      if (this._castling[us]) {\n        for (let i = 0, len = ROOKS[us].length; i < len; i++) {\n          if (move.from === ROOKS[us][i].square && this._castling[us] & ROOKS[us][i].flag) {\n            this._castling[us] ^= ROOKS[us][i].flag;\n            break;\n          }\n        }\n      }\n      if (this._castling[them]) {\n        for (let i = 0, len = ROOKS[them].length; i < len; i++) {\n          if (move.to === ROOKS[them][i].square && this._castling[them] & ROOKS[them][i].flag) {\n            this._castling[them] ^= ROOKS[them][i].flag;\n            break;\n          }\n        }\n      }\n      this._hash ^= this._castlingKey();\n      if (move.flags & BITS.BIG_PAWN) {\n        let epSquare;\n        if (us === BLACK) {\n          epSquare = move.to - 16;\n        } else {\n          epSquare = move.to + 16;\n        }\n        if (!(move.to - 1 & 136) && this._board[move.to - 1]?.type === PAWN && this._board[move.to - 1]?.color === them || !(move.to + 1 & 136) && this._board[move.to + 1]?.type === PAWN && this._board[move.to + 1]?.color === them) {\n          this._epSquare = epSquare;\n          this._hash ^= this._epKey();\n        } else {\n          this._epSquare = EMPTY;\n        }\n      } else {\n        this._epSquare = EMPTY;\n      }\n      if (move.piece === PAWN) {\n        this._halfMoves = 0;\n      } else if (move.flags & (BITS.CAPTURE | BITS.EP_CAPTURE)) {\n        this._halfMoves = 0;\n      } else {\n        this._halfMoves++;\n      }\n      if (us === BLACK) {\n        this._moveNumber++;\n      }\n      this._turn = them;\n      this._hash ^= SIDE_KEY;\n    }\n    undo() {\n      const hash = this._hash;\n      const move = this._undoMove();\n      if (move) {\n        const prettyMove = new Move(this, move);\n        this._decPositionCount(hash);\n        return prettyMove;\n      }\n      return null;\n    }\n    _undoMove() {\n      const old = this._history.pop();\n      if (old === void 0) {\n        return null;\n      }\n      this._hash ^= this._epKey();\n      this._hash ^= this._castlingKey();\n      const move = old.move;\n      this._kings = old.kings;\n      this._turn = old.turn;\n      this._castling = old.castling;\n      this._epSquare = old.epSquare;\n      this._halfMoves = old.halfMoves;\n      this._moveNumber = old.moveNumber;\n      this._hash ^= this._epKey();\n      this._hash ^= this._castlingKey();\n      this._hash ^= SIDE_KEY;\n      const us = this._turn;\n      const them = swapColor(us);\n      if (move.flags & BITS.NULL_MOVE) {\n        return move;\n      }\n      this._movePiece(move.to, move.from);\n      if (move.piece) {\n        this._clear(move.from);\n        this._set(move.from, { type: move.piece, color: us });\n      }\n      if (move.captured) {\n        if (move.flags & BITS.EP_CAPTURE) {\n          let index;\n          if (us === BLACK) {\n            index = move.to - 16;\n          } else {\n            index = move.to + 16;\n          }\n          this._set(index, { type: PAWN, color: them });\n        } else {\n          this._set(move.to, { type: move.captured, color: them });\n        }\n      }\n      if (move.flags & (BITS.KSIDE_CASTLE | BITS.QSIDE_CASTLE)) {\n        let castlingTo, castlingFrom;\n        if (move.flags & BITS.KSIDE_CASTLE) {\n          castlingTo = move.to + 1;\n          castlingFrom = move.to - 1;\n        } else {\n          castlingTo = move.to - 2;\n          castlingFrom = move.to + 1;\n        }\n        this._movePiece(castlingFrom, castlingTo);\n      }\n      return move;\n    }\n    pgn({ newline = "\\n", maxWidth = 0 } = {}) {\n      const result = [];\n      let headerExists = false;\n      for (const i in this._header) {\n        const headerTag = this._header[i];\n        if (headerTag)\n          result.push(`[${i} "${this._header[i]}"]` + newline);\n        headerExists = true;\n      }\n      if (headerExists && this._history.length) {\n        result.push(newline);\n      }\n      const appendComment = (moveString2) => {\n        const comment = this._comments[this.fen()];\n        if (typeof comment !== "undefined") {\n          const delimiter = moveString2.length > 0 ? " " : "";\n          moveString2 = `${moveString2}${delimiter}{${comment}}`;\n        }\n        return moveString2;\n      };\n      const reversedHistory = [];\n      while (this._history.length > 0) {\n        reversedHistory.push(this._undoMove());\n      }\n      const moves = [];\n      let moveString = "";\n      if (reversedHistory.length === 0) {\n        moves.push(appendComment(""));\n      }\n      while (reversedHistory.length > 0) {\n        moveString = appendComment(moveString);\n        const move = reversedHistory.pop();\n        if (!move) {\n          break;\n        }\n        if (!this._history.length && move.color === "b") {\n          const prefix = `${this._moveNumber}. ...`;\n          moveString = moveString ? `${moveString} ${prefix}` : prefix;\n        } else if (move.color === "w") {\n          if (moveString.length) {\n            moves.push(moveString);\n          }\n          moveString = this._moveNumber + ".";\n        }\n        moveString = moveString + " " + this._moveToSan(move, this._moves({ legal: true }));\n        this._makeMove(move);\n      }\n      if (moveString.length) {\n        moves.push(appendComment(moveString));\n      }\n      moves.push(this._header.Result || "*");\n      if (maxWidth === 0) {\n        return result.join("") + moves.join(" ");\n      }\n      const strip = function() {\n        if (result.length > 0 && result[result.length - 1] === " ") {\n          result.pop();\n          return true;\n        }\n        return false;\n      };\n      const wrapComment = function(width, move) {\n        for (const token of move.split(" ")) {\n          if (!token) {\n            continue;\n          }\n          if (width + token.length > maxWidth) {\n            while (strip()) {\n              width--;\n            }\n            result.push(newline);\n            width = 0;\n          }\n          result.push(token);\n          width += token.length;\n          result.push(" ");\n          width++;\n        }\n        if (strip()) {\n          width--;\n        }\n        return width;\n      };\n      let currentWidth = 0;\n      for (let i = 0; i < moves.length; i++) {\n        if (currentWidth + moves[i].length > maxWidth) {\n          if (moves[i].includes("{")) {\n            currentWidth = wrapComment(currentWidth, moves[i]);\n            continue;\n          }\n        }\n        if (currentWidth + moves[i].length > maxWidth && i !== 0) {\n          if (result[result.length - 1] === " ") {\n            result.pop();\n          }\n          result.push(newline);\n          currentWidth = 0;\n        } else if (i !== 0) {\n          result.push(" ");\n          currentWidth++;\n        }\n        result.push(moves[i]);\n        currentWidth += moves[i].length;\n      }\n      return result.join("");\n    }\n    /**\n     * @deprecated Use `setHeader` and `getHeaders` instead. This method will return null header tags (which is not what you want)\n     */\n    header(...args) {\n      for (let i = 0; i < args.length; i += 2) {\n        if (typeof args[i] === "string" && typeof args[i + 1] === "string") {\n          this._header[args[i]] = args[i + 1];\n        }\n      }\n      return this._header;\n    }\n    // TODO: value validation per spec\n    setHeader(key, value) {\n      this._header[key] = value ?? SEVEN_TAG_ROSTER[key] ?? null;\n      return this.getHeaders();\n    }\n    removeHeader(key) {\n      if (key in this._header) {\n        this._header[key] = SEVEN_TAG_ROSTER[key] || null;\n        return true;\n      }\n      return false;\n    }\n    // return only non-null headers (omit placemarker nulls)\n    getHeaders() {\n      const nonNullHeaders = {};\n      for (const [key, value] of Object.entries(this._header)) {\n        if (value !== null) {\n          nonNullHeaders[key] = value;\n        }\n      }\n      return nonNullHeaders;\n    }\n    loadPgn(pgn2, { strict = false, newlineChar = "\\r?\\n" } = {}) {\n      if (newlineChar !== "\\r?\\n") {\n        pgn2 = pgn2.replace(new RegExp(newlineChar, "g"), "\\n");\n      }\n      const parsedPgn = peg$parse(pgn2);\n      this.reset();\n      const headers = parsedPgn.headers;\n      let fen = "";\n      for (const key in headers) {\n        if (key.toLowerCase() === "fen") {\n          fen = headers[key];\n        }\n        this.header(key, headers[key]);\n      }\n      if (!strict) {\n        if (fen) {\n          this.load(fen, { preserveHeaders: true });\n        }\n      } else {\n        if (headers["SetUp"] === "1") {\n          if (!("FEN" in headers)) {\n            throw new Error("Invalid PGN: FEN tag must be supplied with SetUp tag");\n          }\n          this.load(headers["FEN"], { preserveHeaders: true });\n        }\n      }\n      let node2 = parsedPgn.root;\n      while (node2) {\n        if (node2.move) {\n          const move = this._moveFromSan(node2.move, strict);\n          if (move == null) {\n            throw new Error(`Invalid move in PGN: ${node2.move}`);\n          } else {\n            this._makeMove(move);\n            this._incPositionCount();\n          }\n        }\n        if (node2.comment !== void 0) {\n          this._comments[this.fen()] = node2.comment;\n        }\n        node2 = node2.variations[0];\n      }\n      const result = parsedPgn.result;\n      if (result && Object.keys(this._header).length && this._header["Result"] !== result) {\n        this.setHeader("Result", result);\n      }\n    }\n    /*\n     * Convert a move from 0x88 coordinates to Standard Algebraic Notation\n     * (SAN)\n     *\n     * @param {boolean} strict Use the strict SAN parser. It will throw errors\n     * on overly disambiguated moves (see below):\n     *\n     * r1bqkbnr/ppp2ppp/2n5/1B1pP3/4P3/8/PPPP2PP/RNBQK1NR b KQkq - 2 4\n     * 4. ... Nge7 is overly disambiguated because the knight on c6 is pinned\n     * 4. ... Ne7 is technically the valid SAN\n     */\n    _moveToSan(move, moves) {\n      let output = "";\n      if (move.flags & BITS.KSIDE_CASTLE) {\n        output = "O-O";\n      } else if (move.flags & BITS.QSIDE_CASTLE) {\n        output = "O-O-O";\n      } else if (move.flags & BITS.NULL_MOVE) {\n        return SAN_NULLMOVE;\n      } else {\n        if (move.piece !== PAWN) {\n          const disambiguator = getDisambiguator(move, moves);\n          output += move.piece.toUpperCase() + disambiguator;\n        }\n        if (move.flags & (BITS.CAPTURE | BITS.EP_CAPTURE)) {\n          if (move.piece === PAWN) {\n            output += algebraic(move.from)[0];\n          }\n          output += "x";\n        }\n        output += algebraic(move.to);\n        if (move.promotion) {\n          output += "=" + move.promotion.toUpperCase();\n        }\n      }\n      this._makeMove(move);\n      if (this.isCheck()) {\n        if (this.isCheckmate()) {\n          output += "#";\n        } else {\n          output += "+";\n        }\n      }\n      this._undoMove();\n      return output;\n    }\n    // convert a move from Standard Algebraic Notation (SAN) to 0x88 coordinates\n    _moveFromSan(move, strict = false) {\n      let cleanMove = strippedSan(move);\n      if (!strict) {\n        if (cleanMove === "0-0") {\n          cleanMove = "O-O";\n        } else if (cleanMove === "0-0-0") {\n          cleanMove = "O-O-O";\n        }\n      }\n      if (cleanMove == SAN_NULLMOVE) {\n        const res = {\n          color: this._turn,\n          from: 0,\n          to: 0,\n          piece: "k",\n          flags: BITS.NULL_MOVE\n        };\n        return res;\n      }\n      let pieceType = inferPieceType(cleanMove);\n      let moves = this._moves({ legal: true, piece: pieceType });\n      for (let i = 0, len = moves.length; i < len; i++) {\n        if (cleanMove === strippedSan(this._moveToSan(moves[i], moves))) {\n          return moves[i];\n        }\n      }\n      if (strict) {\n        return null;\n      }\n      let piece = void 0;\n      let matches = void 0;\n      let from = void 0;\n      let to = void 0;\n      let promotion = void 0;\n      let overlyDisambiguated = false;\n      matches = cleanMove.match(/([pnbrqkPNBRQK])?([a-h][1-8])x?-?([a-h][1-8])([qrbnQRBN])?/);\n      if (matches) {\n        piece = matches[1];\n        from = matches[2];\n        to = matches[3];\n        promotion = matches[4];\n        if (from.length == 1) {\n          overlyDisambiguated = true;\n        }\n      } else {\n        matches = cleanMove.match(/([pnbrqkPNBRQK])?([a-h]?[1-8]?)x?-?([a-h][1-8])([qrbnQRBN])?/);\n        if (matches) {\n          piece = matches[1];\n          from = matches[2];\n          to = matches[3];\n          promotion = matches[4];\n          if (from.length == 1) {\n            overlyDisambiguated = true;\n          }\n        }\n      }\n      pieceType = inferPieceType(cleanMove);\n      moves = this._moves({\n        legal: true,\n        piece: piece ? piece : pieceType\n      });\n      if (!to) {\n        return null;\n      }\n      for (let i = 0, len = moves.length; i < len; i++) {\n        if (!from) {\n          if (cleanMove === strippedSan(this._moveToSan(moves[i], moves)).replace("x", "")) {\n            return moves[i];\n          }\n        } else if ((!piece || piece.toLowerCase() == moves[i].piece) && Ox88[from] == moves[i].from && Ox88[to] == moves[i].to && (!promotion || promotion.toLowerCase() == moves[i].promotion)) {\n          return moves[i];\n        } else if (overlyDisambiguated) {\n          const square = algebraic(moves[i].from);\n          if ((!piece || piece.toLowerCase() == moves[i].piece) && Ox88[to] == moves[i].to && (from == square[0] || from == square[1]) && (!promotion || promotion.toLowerCase() == moves[i].promotion)) {\n            return moves[i];\n          }\n        }\n      }\n      return null;\n    }\n    ascii() {\n      let s = "   +------------------------+\\n";\n      for (let i = Ox88.a8; i <= Ox88.h1; i++) {\n        if (file(i) === 0) {\n          s += " " + "87654321"[rank(i)] + " |";\n        }\n        if (this._board[i]) {\n          const piece = this._board[i].type;\n          const color = this._board[i].color;\n          const symbol = color === WHITE ? piece.toUpperCase() : piece.toLowerCase();\n          s += " " + symbol + " ";\n        } else {\n          s += " . ";\n        }\n        if (i + 1 & 136) {\n          s += "|\\n";\n          i += 8;\n        }\n      }\n      s += "   +------------------------+\\n";\n      s += "     a  b  c  d  e  f  g  h";\n      return s;\n    }\n    perft(depth) {\n      const moves = this._moves({ legal: false });\n      let nodes = 0;\n      const color = this._turn;\n      for (let i = 0, len = moves.length; i < len; i++) {\n        this._makeMove(moves[i]);\n        if (!this._isKingAttacked(color)) {\n          if (depth - 1 > 0) {\n            nodes += this.perft(depth - 1);\n          } else {\n            nodes++;\n          }\n        }\n        this._undoMove();\n      }\n      return nodes;\n    }\n    setTurn(color) {\n      if (this._turn == color) {\n        return false;\n      }\n      this.move("--");\n      return true;\n    }\n    turn() {\n      return this._turn;\n    }\n    board() {\n      const output = [];\n      let row = [];\n      for (let i = Ox88.a8; i <= Ox88.h1; i++) {\n        if (this._board[i] == null) {\n          row.push(null);\n        } else {\n          row.push({\n            square: algebraic(i),\n            type: this._board[i].type,\n            color: this._board[i].color\n          });\n        }\n        if (i + 1 & 136) {\n          output.push(row);\n          row = [];\n          i += 8;\n        }\n      }\n      return output;\n    }\n    squareColor(square) {\n      if (square in Ox88) {\n        const sq = Ox88[square];\n        return (rank(sq) + file(sq)) % 2 === 0 ? "light" : "dark";\n      }\n      return null;\n    }\n    history({ verbose = false } = {}) {\n      const reversedHistory = [];\n      const moveHistory = [];\n      while (this._history.length > 0) {\n        reversedHistory.push(this._undoMove());\n      }\n      while (true) {\n        const move = reversedHistory.pop();\n        if (!move) {\n          break;\n        }\n        if (verbose) {\n          moveHistory.push(new Move(this, move));\n        } else {\n          moveHistory.push(this._moveToSan(move, this._moves()));\n        }\n        this._makeMove(move);\n      }\n      return moveHistory;\n    }\n    /*\n     * Keeps track of position occurrence counts for the purpose of repetition\n     * checking. Old positions are removed from the map if their counts are reduced to 0.\n     */\n    _getPositionCount(hash) {\n      return this._positionCount.get(hash) ?? 0;\n    }\n    _incPositionCount() {\n      this._positionCount.set(this._hash, (this._positionCount.get(this._hash) ?? 0) + 1);\n    }\n    _decPositionCount(hash) {\n      const currentCount = this._positionCount.get(hash) ?? 0;\n      if (currentCount === 1) {\n        this._positionCount.delete(hash);\n      } else {\n        this._positionCount.set(hash, currentCount - 1);\n      }\n    }\n    _pruneComments() {\n      const reversedHistory = [];\n      const currentComments = {};\n      const copyComment = (fen) => {\n        if (fen in this._comments) {\n          currentComments[fen] = this._comments[fen];\n        }\n      };\n      while (this._history.length > 0) {\n        reversedHistory.push(this._undoMove());\n      }\n      copyComment(this.fen());\n      while (true) {\n        const move = reversedHistory.pop();\n        if (!move) {\n          break;\n        }\n        this._makeMove(move);\n        copyComment(this.fen());\n      }\n      this._comments = currentComments;\n    }\n    getComment() {\n      return this._comments[this.fen()];\n    }\n    setComment(comment) {\n      this._comments[this.fen()] = comment.replace("{", "[").replace("}", "]");\n    }\n    /**\n     * @deprecated Renamed to `removeComment` for consistency\n     */\n    deleteComment() {\n      return this.removeComment();\n    }\n    removeComment() {\n      const comment = this._comments[this.fen()];\n      delete this._comments[this.fen()];\n      return comment;\n    }\n    getComments() {\n      this._pruneComments();\n      return Object.keys(this._comments).map((fen) => {\n        return { fen, comment: this._comments[fen] };\n      });\n    }\n    /**\n     * @deprecated Renamed to `removeComments` for consistency\n     */\n    deleteComments() {\n      return this.removeComments();\n    }\n    removeComments() {\n      this._pruneComments();\n      return Object.keys(this._comments).map((fen) => {\n        const comment = this._comments[fen];\n        delete this._comments[fen];\n        return { fen, comment };\n      });\n    }\n    setCastlingRights(color, rights) {\n      for (const side of [KING, QUEEN]) {\n        if (rights[side] !== void 0) {\n          if (rights[side]) {\n            this._castling[color] |= SIDES[side];\n          } else {\n            this._castling[color] &= ~SIDES[side];\n          }\n        }\n      }\n      this._updateCastlingRights();\n      const result = this.getCastlingRights(color);\n      return (rights[KING] === void 0 || rights[KING] === result[KING]) && (rights[QUEEN] === void 0 || rights[QUEEN] === result[QUEEN]);\n    }\n    getCastlingRights(color) {\n      return {\n        [KING]: (this._castling[color] & SIDES[KING]) !== 0,\n        [QUEEN]: (this._castling[color] & SIDES[QUEEN]) !== 0\n      };\n    }\n    moveNumber() {\n      return this._moveNumber;\n    }\n  };\n\n  // src/evaluation.ts\n  var PIECE_VALUE = { p: 100, n: 320, b: 330, r: 500, q: 900, k: 0 };\n  var PAWN_PST = [\n    [0, 0, 0, 0, 0, 0, 0, 0],\n    [50, 50, 50, 50, 50, 50, 50, 50],\n    [10, 10, 20, 30, 30, 20, 10, 10],\n    [5, 5, 10, 25, 25, 10, 5, 5],\n    [0, 0, 0, 20, 20, 0, 0, 0],\n    [5, -5, -10, 0, 0, -10, -5, 5],\n    [5, 10, 10, -20, -20, 10, 10, 5],\n    [0, 0, 0, 0, 0, 0, 0, 0]\n  ];\n  var KNIGHT_PST = [\n    [-50, -40, -30, -30, -30, -30, -40, -50],\n    [-40, -20, 0, 0, 0, 0, -20, -40],\n    [-30, 0, 10, 15, 15, 10, 0, -30],\n    [-30, 5, 15, 20, 20, 15, 5, -30],\n    [-30, 0, 15, 20, 20, 15, 0, -30],\n    [-30, 5, 10, 15, 15, 10, 5, -30],\n    [-40, -20, 0, 5, 5, 0, -20, -40],\n    [-50, -40, -30, -30, -30, -30, -40, -50]\n  ];\n  var BISHOP_PST = [\n    [-20, -10, -10, -10, -10, -10, -10, -20],\n    [-10, 0, 0, 0, 0, 0, 0, -10],\n    [-10, 0, 5, 10, 10, 5, 0, -10],\n    [-10, 5, 5, 10, 10, 5, 5, -10],\n    [-10, 0, 10, 10, 10, 10, 0, -10],\n    [-10, 10, 10, 10, 10, 10, 10, -10],\n    [-10, 5, 0, 0, 0, 0, 5, -10],\n    [-20, -10, -10, -10, -10, -10, -10, -20]\n  ];\n  var ROOK_PST = [\n    [0, 0, 0, 0, 0, 0, 0, 0],\n    [5, 10, 10, 10, 10, 10, 10, 5],\n    [-5, 0, 0, 0, 0, 0, 0, -5],\n    [-5, 0, 0, 0, 0, 0, 0, -5],\n    [-5, 0, 0, 0, 0, 0, 0, -5],\n    [-5, 0, 0, 0, 0, 0, 0, -5],\n    [-5, 0, 0, 0, 0, 0, 0, -5],\n    [0, 0, 0, 5, 5, 0, 0, 0]\n  ];\n  var QUEEN_PST = [\n    [-20, -10, -10, -5, -5, -10, -10, -20],\n    [-10, 0, 0, 0, 0, 0, 0, -10],\n    [-10, 0, 5, 5, 5, 5, 0, -10],\n    [-5, 0, 5, 5, 5, 5, 0, -5],\n    [0, 0, 5, 5, 5, 5, 0, -5],\n    [-10, 5, 5, 5, 5, 5, 0, -10],\n    [-10, 0, 5, 0, 0, 0, 0, -10],\n    [-20, -10, -10, -5, -5, -10, -10, -20]\n  ];\n  var KING_PST = [\n    [-30, -40, -40, -50, -50, -40, -40, -30],\n    [-30, -40, -40, -50, -50, -40, -40, -30],\n    [-30, -40, -40, -50, -50, -40, -40, -30],\n    [-30, -40, -40, -50, -50, -40, -40, -30],\n    [-20, -30, -30, -40, -40, -30, -30, -20],\n    [-10, -20, -20, -20, -20, -20, -20, -10],\n    [20, 20, 0, 0, 0, 0, 20, 20],\n    [20, 30, 10, 0, 0, 10, 30, 20]\n  ];\n  var PST = {\n    p: PAWN_PST,\n    n: KNIGHT_PST,\n    b: BISHOP_PST,\n    r: ROOK_PST,\n    q: QUEEN_PST,\n    k: KING_PST\n  };\n  var BISHOP_PAIR_BONUS = 30;\n  var MOBILITY_WEIGHT = 2;\n  function evaluate(chess) {\n    let score = 0;\n    const board = chess.board();\n    const bishops = { w: 0, b: 0 };\n    for (let rank2 = 0; rank2 < 8; rank2++) {\n      for (let file2 = 0; file2 < 8; file2++) {\n        const cell = board[rank2][file2];\n        if (!cell)\n          continue;\n        const table = PST[cell.type];\n        const posRank = cell.color === "w" ? rank2 : 7 - rank2;\n        const value = PIECE_VALUE[cell.type] + table[posRank][file2];\n        score += cell.color === "w" ? value : -value;\n        if (cell.type === "b")\n          bishops[cell.color]++;\n      }\n    }\n    if (bishops.w >= 2)\n      score += BISHOP_PAIR_BONUS;\n    if (bishops.b >= 2)\n      score -= BISHOP_PAIR_BONUS;\n    const mobility = chess.moves().length * MOBILITY_WEIGHT;\n    score += chess.turn() === "w" ? mobility : -mobility;\n    return score;\n  }\n\n  // src/search.ts\n  var MATE_SCORE = 1e5;\n  var CAPTURE_VALUE = { p: 100, n: 320, b: 330, r: 500, q: 900, k: 0 };\n  var SearchTimeout = class extends Error {\n  };\n  function orderMoves(moves) {\n    return [...moves].sort((a, b) => {\n      const av = a.captured ? CAPTURE_VALUE[a.captured] : -1;\n      const bv = b.captured ? CAPTURE_VALUE[b.captured] : -1;\n      return bv - av;\n    });\n  }\n  function checkDeadline(nodeCounter, mask, deadline) {\n    if (++nodeCounter.n % mask === 0 && Date.now() > deadline)\n      throw new SearchTimeout();\n  }\n  function quiescence(chess, alpha, beta, color, deadline, nodeCounter, ply) {\n    checkDeadline(nodeCounter, 4096, deadline);\n    const moves = orderMoves(chess.moves({ verbose: true }));\n    if (moves.length === 0) {\n      return chess.isCheckmate() ? -MATE_SCORE + ply : 0;\n    }\n    if (chess.isCheck()) {\n      let best = -Infinity;\n      for (const m of moves) {\n        chess.move(m);\n        let score;\n        try {\n          score = -quiescence(chess, -beta, -alpha, -color, deadline, nodeCounter, ply + 1);\n        } finally {\n          chess.undo();\n        }\n        if (score > best)\n          best = score;\n        if (score > alpha)\n          alpha = score;\n        if (alpha >= beta)\n          break;\n      }\n      return best;\n    }\n    const standPat = color * evaluate(chess);\n    if (standPat >= beta)\n      return beta;\n    if (standPat > alpha)\n      alpha = standPat;\n    const captures = moves.filter((m) => m.captured);\n    for (const m of captures) {\n      chess.move(m);\n      let score;\n      try {\n        score = -quiescence(chess, -beta, -alpha, -color, deadline, nodeCounter, ply + 1);\n      } finally {\n        chess.undo();\n      }\n      if (score >= beta)\n        return beta;\n      if (score > alpha)\n        alpha = score;\n    }\n    return alpha;\n  }\n  function negamax(chess, depth, alpha, beta, color, ply, profile, deadline, nodeCounter) {\n    checkDeadline(nodeCounter, 2048, deadline);\n    const moves = orderMoves(chess.moves({ verbose: true }));\n    if (moves.length === 0) {\n      if (chess.isCheckmate())\n        return -MATE_SCORE + ply;\n      return 0;\n    }\n    if (depth === 0) {\n      return profile.quiescence ? quiescence(chess, alpha, beta, color, deadline, nodeCounter, ply) : color * evaluate(chess);\n    }\n    let best = -Infinity;\n    for (const m of moves) {\n      chess.move(m);\n      let score;\n      try {\n        score = -negamax(chess, depth - 1, -beta, -alpha, -color, ply + 1, profile, deadline, nodeCounter);\n      } finally {\n        chess.undo();\n      }\n      if (score > best)\n        best = score;\n      if (score > alpha)\n        alpha = score;\n      if (alpha >= beta)\n        break;\n    }\n    return best;\n  }\n  function pickMove(ranked, profile, rng) {\n    if (profile.blunderChance > 0 && rng() < profile.blunderChance) {\n      const poolSize = Math.max(1, Math.round(ranked.length * profile.blunderPoolFraction));\n      const pool2 = ranked.slice(ranked.length - poolSize);\n      return pool2[Math.floor(rng() * pool2.length)];\n    }\n    const topN = Math.min(profile.topN, ranked.length);\n    const pool = ranked.slice(0, topN);\n    return pool[Math.floor(rng() * pool.length)];\n  }\n  function findMove(chess, profile, rng = Math.random) {\n    const rootMoves = orderMoves(chess.moves({ verbose: true }));\n    if (rootMoves.length === 0)\n      throw new Error("no legal moves in this position");\n    const deadline = Date.now() + profile.timeBudgetMs;\n    const color = chess.turn() === "w" ? 1 : -1;\n    let ranked = rootMoves.map((move) => ({ move, score: 0 }));\n    let depthReached = 0;\n    for (let depth = 1; depth <= profile.depth; depth++) {\n      const nodeCounter = { n: 0 };\n      const scored = [];\n      try {\n        const ordered = [...ranked].sort((a, b) => b.score - a.score).map((sm) => sm.move);\n        let alpha = -Infinity;\n        const beta = Infinity;\n        for (const move of ordered) {\n          chess.move(move);\n          let score;\n          try {\n            score = -negamax(chess, depth - 1, -beta, -alpha, -color, 1, profile, deadline, nodeCounter);\n          } finally {\n            chess.undo();\n          }\n          scored.push({ move, score });\n          if (score > alpha)\n            alpha = score;\n        }\n      } catch (e) {\n        if (e instanceof SearchTimeout)\n          break;\n        throw e;\n      }\n      ranked = scored;\n      depthReached = depth;\n    }\n    ranked.sort((a, b) => b.score - a.score);\n    const chosen = pickMove(ranked, profile, rng);\n    return { move: chosen.move, evalCp: color * chosen.score, depthReached };\n  }\n\n  // src/engine-worker.ts\n  self.onmessage = (e) => {\n    const { id, fen, profile } = e.data;\n    try {\n      const chess = new Chess(fen);\n      const { move, evalCp, depthReached } = findMove(chess, profile);\n      const response = {\n        id,\n        ok: true,\n        from: move.from,\n        to: move.to,\n        promotion: move.promotion,\n        evalCp,\n        depthReached\n      };\n      self.postMessage(response);\n    } catch (err) {\n      const response = { id, ok: false, error: String(err) };\n      self.postMessage(response);\n    }\n  };\n})();\n/*! Bundled license information:\n\nchess.js/dist/esm/chess.js:\n  (**\n   * @license\n   * Copyright (c) 2025, Jeff Hlywa (jhlywa@gmail.com)\n   * All rights reserved.\n   *\n   * Redistribution and use in source and binary forms, with or without\n   * modification, are permitted provided that the following conditions are met:\n   *\n   * 1. Redistributions of source code must retain the above copyright notice,\n   *    this list of conditions and the following disclaimer.\n   * 2. Redistributions in binary form must reproduce the above copyright notice,\n   *    this list of conditions and the following disclaimer in the documentation\n   *    and/or other materials provided with the distribution.\n   *\n   * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"\n   * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE\n   * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE\n   * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE\n   * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR\n   * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF\n   * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS\n   * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN\n   * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)\n   * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE\n   * POSSIBILITY OF SUCH DAMAGE.\n   *)\n*/\n'], { type: "text/javascript" });
+    const blob = new Blob(['(() => {\n  var __defProp = Object.defineProperty;\n  var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;\n  var __publicField = (obj, key, value) => {\n    __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);\n    return value;\n  };\n\n  // node_modules/chess.js/dist/esm/chess.js\n  function rootNode(comment) {\n    return comment !== null ? { comment, variations: [] } : { variations: [] };\n  }\n  function node(move, suffix, nag, comment, variations) {\n    const node2 = { move, variations };\n    if (suffix) {\n      node2.suffix = suffix;\n    }\n    if (nag) {\n      node2.nag = nag;\n    }\n    if (comment !== null) {\n      node2.comment = comment;\n    }\n    return node2;\n  }\n  function lineToTree(...nodes) {\n    const [root, ...rest] = nodes;\n    let parent = root;\n    for (const child of rest) {\n      if (child !== null) {\n        parent.variations = [child, ...child.variations];\n        child.variations = [];\n        parent = child;\n      }\n    }\n    return root;\n  }\n  function pgn(headers, game) {\n    if (game.marker && game.marker.comment) {\n      let node2 = game.root;\n      while (true) {\n        const next = node2.variations[0];\n        if (!next) {\n          node2.comment = game.marker.comment;\n          break;\n        }\n        node2 = next;\n      }\n    }\n    return {\n      headers,\n      root: game.root,\n      result: (game.marker && game.marker.result) ?? void 0\n    };\n  }\n  function peg$subclass(child, parent) {\n    function C() {\n      this.constructor = child;\n    }\n    C.prototype = parent.prototype;\n    child.prototype = new C();\n  }\n  function peg$SyntaxError(message, expected, found, location) {\n    var self2 = Error.call(this, message);\n    if (Object.setPrototypeOf) {\n      Object.setPrototypeOf(self2, peg$SyntaxError.prototype);\n    }\n    self2.expected = expected;\n    self2.found = found;\n    self2.location = location;\n    self2.name = "SyntaxError";\n    return self2;\n  }\n  peg$subclass(peg$SyntaxError, Error);\n  function peg$padEnd(str, targetLength, padString) {\n    padString = padString || " ";\n    if (str.length > targetLength) {\n      return str;\n    }\n    targetLength -= str.length;\n    padString += padString.repeat(targetLength);\n    return str + padString.slice(0, targetLength);\n  }\n  peg$SyntaxError.prototype.format = function(sources) {\n    var str = "Error: " + this.message;\n    if (this.location) {\n      var src = null;\n      var k;\n      for (k = 0; k < sources.length; k++) {\n        if (sources[k].source === this.location.source) {\n          src = sources[k].text.split(/\\r\\n|\\n|\\r/g);\n          break;\n        }\n      }\n      var s = this.location.start;\n      var offset_s = this.location.source && typeof this.location.source.offset === "function" ? this.location.source.offset(s) : s;\n      var loc = this.location.source + ":" + offset_s.line + ":" + offset_s.column;\n      if (src) {\n        var e = this.location.end;\n        var filler = peg$padEnd("", offset_s.line.toString().length, " ");\n        var line = src[s.line - 1];\n        var last = s.line === e.line ? e.column : line.length + 1;\n        var hatLen = last - s.column || 1;\n        str += "\\n --> " + loc + "\\n" + filler + " |\\n" + offset_s.line + " | " + line + "\\n" + filler + " | " + peg$padEnd("", s.column - 1, " ") + peg$padEnd("", hatLen, "^");\n      } else {\n        str += "\\n at " + loc;\n      }\n    }\n    return str;\n  };\n  peg$SyntaxError.buildMessage = function(expected, found) {\n    var DESCRIBE_EXPECTATION_FNS = {\n      literal: function(expectation) {\n        return \'"\' + literalEscape(expectation.text) + \'"\';\n      },\n      class: function(expectation) {\n        var escapedParts = expectation.parts.map(function(part) {\n          return Array.isArray(part) ? classEscape(part[0]) + "-" + classEscape(part[1]) : classEscape(part);\n        });\n        return "[" + (expectation.inverted ? "^" : "") + escapedParts.join("") + "]";\n      },\n      any: function() {\n        return "any character";\n      },\n      end: function() {\n        return "end of input";\n      },\n      other: function(expectation) {\n        return expectation.description;\n      }\n    };\n    function hex(ch) {\n      return ch.charCodeAt(0).toString(16).toUpperCase();\n    }\n    function literalEscape(s) {\n      return s.replace(/\\\\/g, "\\\\\\\\").replace(/"/g, \'\\\\"\').replace(/\\0/g, "\\\\0").replace(/\\t/g, "\\\\t").replace(/\\n/g, "\\\\n").replace(/\\r/g, "\\\\r").replace(/[\\x00-\\x0F]/g, function(ch) {\n        return "\\\\x0" + hex(ch);\n      }).replace(/[\\x10-\\x1F\\x7F-\\x9F]/g, function(ch) {\n        return "\\\\x" + hex(ch);\n      });\n    }\n    function classEscape(s) {\n      return s.replace(/\\\\/g, "\\\\\\\\").replace(/\\]/g, "\\\\]").replace(/\\^/g, "\\\\^").replace(/-/g, "\\\\-").replace(/\\0/g, "\\\\0").replace(/\\t/g, "\\\\t").replace(/\\n/g, "\\\\n").replace(/\\r/g, "\\\\r").replace(/[\\x00-\\x0F]/g, function(ch) {\n        return "\\\\x0" + hex(ch);\n      }).replace(/[\\x10-\\x1F\\x7F-\\x9F]/g, function(ch) {\n        return "\\\\x" + hex(ch);\n      });\n    }\n    function describeExpectation(expectation) {\n      return DESCRIBE_EXPECTATION_FNS[expectation.type](expectation);\n    }\n    function describeExpected(expected2) {\n      var descriptions = expected2.map(describeExpectation);\n      var i, j;\n      descriptions.sort();\n      if (descriptions.length > 0) {\n        for (i = 1, j = 1; i < descriptions.length; i++) {\n          if (descriptions[i - 1] !== descriptions[i]) {\n            descriptions[j] = descriptions[i];\n            j++;\n          }\n        }\n        descriptions.length = j;\n      }\n      switch (descriptions.length) {\n        case 1:\n          return descriptions[0];\n        case 2:\n          return descriptions[0] + " or " + descriptions[1];\n        default:\n          return descriptions.slice(0, -1).join(", ") + ", or " + descriptions[descriptions.length - 1];\n      }\n    }\n    function describeFound(found2) {\n      return found2 ? \'"\' + literalEscape(found2) + \'"\' : "end of input";\n    }\n    return "Expected " + describeExpected(expected) + " but " + describeFound(found) + " found.";\n  };\n  function peg$parse(input, options) {\n    options = options !== void 0 ? options : {};\n    var peg$FAILED = {};\n    var peg$source = options.grammarSource;\n    var peg$startRuleFunctions = { pgn: peg$parsepgn };\n    var peg$startRuleFunction = peg$parsepgn;\n    var peg$c0 = "[";\n    var peg$c1 = \'"\';\n    var peg$c2 = "]";\n    var peg$c3 = ".";\n    var peg$c4 = "O-O-O";\n    var peg$c5 = "O-O";\n    var peg$c6 = "0-0-0";\n    var peg$c7 = "0-0";\n    var peg$c8 = "$";\n    var peg$c9 = "{";\n    var peg$c10 = "}";\n    var peg$c11 = ";";\n    var peg$c12 = "(";\n    var peg$c13 = ")";\n    var peg$c14 = "1-0";\n    var peg$c15 = "0-1";\n    var peg$c16 = "1/2-1/2";\n    var peg$c17 = "*";\n    var peg$r0 = /^[a-zA-Z]/;\n    var peg$r1 = /^[^"]/;\n    var peg$r2 = /^[0-9]/;\n    var peg$r3 = /^[.]/;\n    var peg$r4 = /^[a-zA-Z1-8\\-=]/;\n    var peg$r5 = /^[+#]/;\n    var peg$r6 = /^[!?]/;\n    var peg$r7 = /^[^}]/;\n    var peg$r8 = /^[^\\r\\n]/;\n    var peg$r9 = /^[ \\t\\r\\n]/;\n    var peg$e0 = peg$otherExpectation("tag pair");\n    var peg$e1 = peg$literalExpectation("[", false);\n    var peg$e2 = peg$literalExpectation(\'"\', false);\n    var peg$e3 = peg$literalExpectation("]", false);\n    var peg$e4 = peg$otherExpectation("tag name");\n    var peg$e5 = peg$classExpectation([["a", "z"], ["A", "Z"]], false, false);\n    var peg$e6 = peg$otherExpectation("tag value");\n    var peg$e7 = peg$classExpectation([\'"\'], true, false);\n    var peg$e8 = peg$otherExpectation("move number");\n    var peg$e9 = peg$classExpectation([["0", "9"]], false, false);\n    var peg$e10 = peg$literalExpectation(".", false);\n    var peg$e11 = peg$classExpectation(["."], false, false);\n    var peg$e12 = peg$otherExpectation("standard algebraic notation");\n    var peg$e13 = peg$literalExpectation("O-O-O", false);\n    var peg$e14 = peg$literalExpectation("O-O", false);\n    var peg$e15 = peg$literalExpectation("0-0-0", false);\n    var peg$e16 = peg$literalExpectation("0-0", false);\n    var peg$e17 = peg$classExpectation([["a", "z"], ["A", "Z"], ["1", "8"], "-", "="], false, false);\n    var peg$e18 = peg$classExpectation(["+", "#"], false, false);\n    var peg$e19 = peg$otherExpectation("suffix annotation");\n    var peg$e20 = peg$classExpectation(["!", "?"], false, false);\n    var peg$e21 = peg$otherExpectation("NAG");\n    var peg$e22 = peg$literalExpectation("$", false);\n    var peg$e23 = peg$otherExpectation("brace comment");\n    var peg$e24 = peg$literalExpectation("{", false);\n    var peg$e25 = peg$classExpectation(["}"], true, false);\n    var peg$e26 = peg$literalExpectation("}", false);\n    var peg$e27 = peg$otherExpectation("rest of line comment");\n    var peg$e28 = peg$literalExpectation(";", false);\n    var peg$e29 = peg$classExpectation(["\\r", "\\n"], true, false);\n    var peg$e30 = peg$otherExpectation("variation");\n    var peg$e31 = peg$literalExpectation("(", false);\n    var peg$e32 = peg$literalExpectation(")", false);\n    var peg$e33 = peg$otherExpectation("game termination marker");\n    var peg$e34 = peg$literalExpectation("1-0", false);\n    var peg$e35 = peg$literalExpectation("0-1", false);\n    var peg$e36 = peg$literalExpectation("1/2-1/2", false);\n    var peg$e37 = peg$literalExpectation("*", false);\n    var peg$e38 = peg$otherExpectation("whitespace");\n    var peg$e39 = peg$classExpectation([" ", "	", "\\r", "\\n"], false, false);\n    var peg$f0 = function(headers, game) {\n      return pgn(headers, game);\n    };\n    var peg$f1 = function(tagPairs) {\n      return Object.fromEntries(tagPairs);\n    };\n    var peg$f2 = function(tagName, tagValue) {\n      return [tagName, tagValue];\n    };\n    var peg$f3 = function(root, marker) {\n      return { root, marker };\n    };\n    var peg$f4 = function(comment, moves) {\n      return lineToTree(rootNode(comment), ...moves.flat());\n    };\n    var peg$f5 = function(san, suffix, nag, comment, variations) {\n      return node(san, suffix, nag, comment, variations);\n    };\n    var peg$f6 = function(nag) {\n      return nag;\n    };\n    var peg$f7 = function(comment) {\n      return comment.replace(/[\\r\\n]+/g, " ");\n    };\n    var peg$f8 = function(comment) {\n      return comment.trim();\n    };\n    var peg$f9 = function(line) {\n      return line;\n    };\n    var peg$f10 = function(result, comment) {\n      return { result, comment };\n    };\n    var peg$currPos = options.peg$currPos | 0;\n    var peg$posDetailsCache = [{ line: 1, column: 1 }];\n    var peg$maxFailPos = peg$currPos;\n    var peg$maxFailExpected = options.peg$maxFailExpected || [];\n    var peg$silentFails = options.peg$silentFails | 0;\n    var peg$result;\n    if (options.startRule) {\n      if (!(options.startRule in peg$startRuleFunctions)) {\n        throw new Error(`Can\'t start parsing from rule "` + options.startRule + \'".\');\n      }\n      peg$startRuleFunction = peg$startRuleFunctions[options.startRule];\n    }\n    function peg$literalExpectation(text, ignoreCase) {\n      return { type: "literal", text, ignoreCase };\n    }\n    function peg$classExpectation(parts, inverted, ignoreCase) {\n      return { type: "class", parts, inverted, ignoreCase };\n    }\n    function peg$endExpectation() {\n      return { type: "end" };\n    }\n    function peg$otherExpectation(description) {\n      return { type: "other", description };\n    }\n    function peg$computePosDetails(pos) {\n      var details = peg$posDetailsCache[pos];\n      var p;\n      if (details) {\n        return details;\n      } else {\n        if (pos >= peg$posDetailsCache.length) {\n          p = peg$posDetailsCache.length - 1;\n        } else {\n          p = pos;\n          while (!peg$posDetailsCache[--p]) {\n          }\n        }\n        details = peg$posDetailsCache[p];\n        details = {\n          line: details.line,\n          column: details.column\n        };\n        while (p < pos) {\n          if (input.charCodeAt(p) === 10) {\n            details.line++;\n            details.column = 1;\n          } else {\n            details.column++;\n          }\n          p++;\n        }\n        peg$posDetailsCache[pos] = details;\n        return details;\n      }\n    }\n    function peg$computeLocation(startPos, endPos, offset) {\n      var startPosDetails = peg$computePosDetails(startPos);\n      var endPosDetails = peg$computePosDetails(endPos);\n      var res = {\n        source: peg$source,\n        start: {\n          offset: startPos,\n          line: startPosDetails.line,\n          column: startPosDetails.column\n        },\n        end: {\n          offset: endPos,\n          line: endPosDetails.line,\n          column: endPosDetails.column\n        }\n      };\n      return res;\n    }\n    function peg$fail(expected) {\n      if (peg$currPos < peg$maxFailPos) {\n        return;\n      }\n      if (peg$currPos > peg$maxFailPos) {\n        peg$maxFailPos = peg$currPos;\n        peg$maxFailExpected = [];\n      }\n      peg$maxFailExpected.push(expected);\n    }\n    function peg$buildStructuredError(expected, found, location) {\n      return new peg$SyntaxError(\n        peg$SyntaxError.buildMessage(expected, found),\n        expected,\n        found,\n        location\n      );\n    }\n    function peg$parsepgn() {\n      var s0, s1, s2;\n      s0 = peg$currPos;\n      s1 = peg$parsetagPairSection();\n      s2 = peg$parsemoveTextSection();\n      s0 = peg$f0(s1, s2);\n      return s0;\n    }\n    function peg$parsetagPairSection() {\n      var s0, s1, s2;\n      s0 = peg$currPos;\n      s1 = [];\n      s2 = peg$parsetagPair();\n      while (s2 !== peg$FAILED) {\n        s1.push(s2);\n        s2 = peg$parsetagPair();\n      }\n      s2 = peg$parse_();\n      s0 = peg$f1(s1);\n      return s0;\n    }\n    function peg$parsetagPair() {\n      var s0, s2, s4, s6, s7, s8, s10;\n      peg$silentFails++;\n      s0 = peg$currPos;\n      peg$parse_();\n      if (input.charCodeAt(peg$currPos) === 91) {\n        s2 = peg$c0;\n        peg$currPos++;\n      } else {\n        s2 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e1);\n        }\n      }\n      if (s2 !== peg$FAILED) {\n        peg$parse_();\n        s4 = peg$parsetagName();\n        if (s4 !== peg$FAILED) {\n          peg$parse_();\n          if (input.charCodeAt(peg$currPos) === 34) {\n            s6 = peg$c1;\n            peg$currPos++;\n          } else {\n            s6 = peg$FAILED;\n            if (peg$silentFails === 0) {\n              peg$fail(peg$e2);\n            }\n          }\n          if (s6 !== peg$FAILED) {\n            s7 = peg$parsetagValue();\n            if (input.charCodeAt(peg$currPos) === 34) {\n              s8 = peg$c1;\n              peg$currPos++;\n            } else {\n              s8 = peg$FAILED;\n              if (peg$silentFails === 0) {\n                peg$fail(peg$e2);\n              }\n            }\n            if (s8 !== peg$FAILED) {\n              peg$parse_();\n              if (input.charCodeAt(peg$currPos) === 93) {\n                s10 = peg$c2;\n                peg$currPos++;\n              } else {\n                s10 = peg$FAILED;\n                if (peg$silentFails === 0) {\n                  peg$fail(peg$e3);\n                }\n              }\n              if (s10 !== peg$FAILED) {\n                s0 = peg$f2(s4, s7);\n              } else {\n                peg$currPos = s0;\n                s0 = peg$FAILED;\n              }\n            } else {\n              peg$currPos = s0;\n              s0 = peg$FAILED;\n            }\n          } else {\n            peg$currPos = s0;\n            s0 = peg$FAILED;\n          }\n        } else {\n          peg$currPos = s0;\n          s0 = peg$FAILED;\n        }\n      } else {\n        peg$currPos = s0;\n        s0 = peg$FAILED;\n      }\n      peg$silentFails--;\n      if (s0 === peg$FAILED) {\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e0);\n        }\n      }\n      return s0;\n    }\n    function peg$parsetagName() {\n      var s0, s1, s2;\n      peg$silentFails++;\n      s0 = peg$currPos;\n      s1 = [];\n      s2 = input.charAt(peg$currPos);\n      if (peg$r0.test(s2)) {\n        peg$currPos++;\n      } else {\n        s2 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e5);\n        }\n      }\n      if (s2 !== peg$FAILED) {\n        while (s2 !== peg$FAILED) {\n          s1.push(s2);\n          s2 = input.charAt(peg$currPos);\n          if (peg$r0.test(s2)) {\n            peg$currPos++;\n          } else {\n            s2 = peg$FAILED;\n            if (peg$silentFails === 0) {\n              peg$fail(peg$e5);\n            }\n          }\n        }\n      } else {\n        s1 = peg$FAILED;\n      }\n      if (s1 !== peg$FAILED) {\n        s0 = input.substring(s0, peg$currPos);\n      } else {\n        s0 = s1;\n      }\n      peg$silentFails--;\n      if (s0 === peg$FAILED) {\n        s1 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e4);\n        }\n      }\n      return s0;\n    }\n    function peg$parsetagValue() {\n      var s0, s1, s2;\n      peg$silentFails++;\n      s0 = peg$currPos;\n      s1 = [];\n      s2 = input.charAt(peg$currPos);\n      if (peg$r1.test(s2)) {\n        peg$currPos++;\n      } else {\n        s2 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e7);\n        }\n      }\n      while (s2 !== peg$FAILED) {\n        s1.push(s2);\n        s2 = input.charAt(peg$currPos);\n        if (peg$r1.test(s2)) {\n          peg$currPos++;\n        } else {\n          s2 = peg$FAILED;\n          if (peg$silentFails === 0) {\n            peg$fail(peg$e7);\n          }\n        }\n      }\n      s0 = input.substring(s0, peg$currPos);\n      peg$silentFails--;\n      s1 = peg$FAILED;\n      if (peg$silentFails === 0) {\n        peg$fail(peg$e6);\n      }\n      return s0;\n    }\n    function peg$parsemoveTextSection() {\n      var s0, s1, s3;\n      s0 = peg$currPos;\n      s1 = peg$parseline();\n      peg$parse_();\n      s3 = peg$parsegameTerminationMarker();\n      if (s3 === peg$FAILED) {\n        s3 = null;\n      }\n      peg$parse_();\n      s0 = peg$f3(s1, s3);\n      return s0;\n    }\n    function peg$parseline() {\n      var s0, s1, s2, s3;\n      s0 = peg$currPos;\n      s1 = peg$parsecomment();\n      if (s1 === peg$FAILED) {\n        s1 = null;\n      }\n      s2 = [];\n      s3 = peg$parsemove();\n      while (s3 !== peg$FAILED) {\n        s2.push(s3);\n        s3 = peg$parsemove();\n      }\n      s0 = peg$f4(s1, s2);\n      return s0;\n    }\n    function peg$parsemove() {\n      var s0, s4, s5, s6, s7, s8, s9, s10;\n      s0 = peg$currPos;\n      peg$parse_();\n      peg$parsemoveNumber();\n      peg$parse_();\n      s4 = peg$parsesan();\n      if (s4 !== peg$FAILED) {\n        s5 = peg$parsesuffixAnnotation();\n        if (s5 === peg$FAILED) {\n          s5 = null;\n        }\n        s6 = [];\n        s7 = peg$parsenag();\n        while (s7 !== peg$FAILED) {\n          s6.push(s7);\n          s7 = peg$parsenag();\n        }\n        s7 = peg$parse_();\n        s8 = peg$parsecomment();\n        if (s8 === peg$FAILED) {\n          s8 = null;\n        }\n        s9 = [];\n        s10 = peg$parsevariation();\n        while (s10 !== peg$FAILED) {\n          s9.push(s10);\n          s10 = peg$parsevariation();\n        }\n        s0 = peg$f5(s4, s5, s6, s8, s9);\n      } else {\n        peg$currPos = s0;\n        s0 = peg$FAILED;\n      }\n      return s0;\n    }\n    function peg$parsemoveNumber() {\n      var s0, s1, s2, s3, s4, s5;\n      peg$silentFails++;\n      s0 = peg$currPos;\n      s1 = [];\n      s2 = input.charAt(peg$currPos);\n      if (peg$r2.test(s2)) {\n        peg$currPos++;\n      } else {\n        s2 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e9);\n        }\n      }\n      while (s2 !== peg$FAILED) {\n        s1.push(s2);\n        s2 = input.charAt(peg$currPos);\n        if (peg$r2.test(s2)) {\n          peg$currPos++;\n        } else {\n          s2 = peg$FAILED;\n          if (peg$silentFails === 0) {\n            peg$fail(peg$e9);\n          }\n        }\n      }\n      if (input.charCodeAt(peg$currPos) === 46) {\n        s2 = peg$c3;\n        peg$currPos++;\n      } else {\n        s2 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e10);\n        }\n      }\n      if (s2 !== peg$FAILED) {\n        s3 = peg$parse_();\n        s4 = [];\n        s5 = input.charAt(peg$currPos);\n        if (peg$r3.test(s5)) {\n          peg$currPos++;\n        } else {\n          s5 = peg$FAILED;\n          if (peg$silentFails === 0) {\n            peg$fail(peg$e11);\n          }\n        }\n        while (s5 !== peg$FAILED) {\n          s4.push(s5);\n          s5 = input.charAt(peg$currPos);\n          if (peg$r3.test(s5)) {\n            peg$currPos++;\n          } else {\n            s5 = peg$FAILED;\n            if (peg$silentFails === 0) {\n              peg$fail(peg$e11);\n            }\n          }\n        }\n        s1 = [s1, s2, s3, s4];\n        s0 = s1;\n      } else {\n        peg$currPos = s0;\n        s0 = peg$FAILED;\n      }\n      peg$silentFails--;\n      if (s0 === peg$FAILED) {\n        s1 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e8);\n        }\n      }\n      return s0;\n    }\n    function peg$parsesan() {\n      var s0, s1, s2, s3, s4, s5;\n      peg$silentFails++;\n      s0 = peg$currPos;\n      s1 = peg$currPos;\n      if (input.substr(peg$currPos, 5) === peg$c4) {\n        s2 = peg$c4;\n        peg$currPos += 5;\n      } else {\n        s2 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e13);\n        }\n      }\n      if (s2 === peg$FAILED) {\n        if (input.substr(peg$currPos, 3) === peg$c5) {\n          s2 = peg$c5;\n          peg$currPos += 3;\n        } else {\n          s2 = peg$FAILED;\n          if (peg$silentFails === 0) {\n            peg$fail(peg$e14);\n          }\n        }\n        if (s2 === peg$FAILED) {\n          if (input.substr(peg$currPos, 5) === peg$c6) {\n            s2 = peg$c6;\n            peg$currPos += 5;\n          } else {\n            s2 = peg$FAILED;\n            if (peg$silentFails === 0) {\n              peg$fail(peg$e15);\n            }\n          }\n          if (s2 === peg$FAILED) {\n            if (input.substr(peg$currPos, 3) === peg$c7) {\n              s2 = peg$c7;\n              peg$currPos += 3;\n            } else {\n              s2 = peg$FAILED;\n              if (peg$silentFails === 0) {\n                peg$fail(peg$e16);\n              }\n            }\n            if (s2 === peg$FAILED) {\n              s2 = peg$currPos;\n              s3 = input.charAt(peg$currPos);\n              if (peg$r0.test(s3)) {\n                peg$currPos++;\n              } else {\n                s3 = peg$FAILED;\n                if (peg$silentFails === 0) {\n                  peg$fail(peg$e5);\n                }\n              }\n              if (s3 !== peg$FAILED) {\n                s4 = [];\n                s5 = input.charAt(peg$currPos);\n                if (peg$r4.test(s5)) {\n                  peg$currPos++;\n                } else {\n                  s5 = peg$FAILED;\n                  if (peg$silentFails === 0) {\n                    peg$fail(peg$e17);\n                  }\n                }\n                if (s5 !== peg$FAILED) {\n                  while (s5 !== peg$FAILED) {\n                    s4.push(s5);\n                    s5 = input.charAt(peg$currPos);\n                    if (peg$r4.test(s5)) {\n                      peg$currPos++;\n                    } else {\n                      s5 = peg$FAILED;\n                      if (peg$silentFails === 0) {\n                        peg$fail(peg$e17);\n                      }\n                    }\n                  }\n                } else {\n                  s4 = peg$FAILED;\n                }\n                if (s4 !== peg$FAILED) {\n                  s3 = [s3, s4];\n                  s2 = s3;\n                } else {\n                  peg$currPos = s2;\n                  s2 = peg$FAILED;\n                }\n              } else {\n                peg$currPos = s2;\n                s2 = peg$FAILED;\n              }\n            }\n          }\n        }\n      }\n      if (s2 !== peg$FAILED) {\n        s3 = input.charAt(peg$currPos);\n        if (peg$r5.test(s3)) {\n          peg$currPos++;\n        } else {\n          s3 = peg$FAILED;\n          if (peg$silentFails === 0) {\n            peg$fail(peg$e18);\n          }\n        }\n        if (s3 === peg$FAILED) {\n          s3 = null;\n        }\n        s2 = [s2, s3];\n        s1 = s2;\n      } else {\n        peg$currPos = s1;\n        s1 = peg$FAILED;\n      }\n      if (s1 !== peg$FAILED) {\n        s0 = input.substring(s0, peg$currPos);\n      } else {\n        s0 = s1;\n      }\n      peg$silentFails--;\n      if (s0 === peg$FAILED) {\n        s1 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e12);\n        }\n      }\n      return s0;\n    }\n    function peg$parsesuffixAnnotation() {\n      var s0, s1, s2;\n      peg$silentFails++;\n      s0 = peg$currPos;\n      s1 = [];\n      s2 = input.charAt(peg$currPos);\n      if (peg$r6.test(s2)) {\n        peg$currPos++;\n      } else {\n        s2 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e20);\n        }\n      }\n      while (s2 !== peg$FAILED) {\n        s1.push(s2);\n        if (s1.length >= 2) {\n          s2 = peg$FAILED;\n        } else {\n          s2 = input.charAt(peg$currPos);\n          if (peg$r6.test(s2)) {\n            peg$currPos++;\n          } else {\n            s2 = peg$FAILED;\n            if (peg$silentFails === 0) {\n              peg$fail(peg$e20);\n            }\n          }\n        }\n      }\n      if (s1.length < 1) {\n        peg$currPos = s0;\n        s0 = peg$FAILED;\n      } else {\n        s0 = s1;\n      }\n      peg$silentFails--;\n      if (s0 === peg$FAILED) {\n        s1 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e19);\n        }\n      }\n      return s0;\n    }\n    function peg$parsenag() {\n      var s0, s2, s3, s4, s5;\n      peg$silentFails++;\n      s0 = peg$currPos;\n      peg$parse_();\n      if (input.charCodeAt(peg$currPos) === 36) {\n        s2 = peg$c8;\n        peg$currPos++;\n      } else {\n        s2 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e22);\n        }\n      }\n      if (s2 !== peg$FAILED) {\n        s3 = peg$currPos;\n        s4 = [];\n        s5 = input.charAt(peg$currPos);\n        if (peg$r2.test(s5)) {\n          peg$currPos++;\n        } else {\n          s5 = peg$FAILED;\n          if (peg$silentFails === 0) {\n            peg$fail(peg$e9);\n          }\n        }\n        if (s5 !== peg$FAILED) {\n          while (s5 !== peg$FAILED) {\n            s4.push(s5);\n            s5 = input.charAt(peg$currPos);\n            if (peg$r2.test(s5)) {\n              peg$currPos++;\n            } else {\n              s5 = peg$FAILED;\n              if (peg$silentFails === 0) {\n                peg$fail(peg$e9);\n              }\n            }\n          }\n        } else {\n          s4 = peg$FAILED;\n        }\n        if (s4 !== peg$FAILED) {\n          s3 = input.substring(s3, peg$currPos);\n        } else {\n          s3 = s4;\n        }\n        if (s3 !== peg$FAILED) {\n          s0 = peg$f6(s3);\n        } else {\n          peg$currPos = s0;\n          s0 = peg$FAILED;\n        }\n      } else {\n        peg$currPos = s0;\n        s0 = peg$FAILED;\n      }\n      peg$silentFails--;\n      if (s0 === peg$FAILED) {\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e21);\n        }\n      }\n      return s0;\n    }\n    function peg$parsecomment() {\n      var s0;\n      s0 = peg$parsebraceComment();\n      if (s0 === peg$FAILED) {\n        s0 = peg$parserestOfLineComment();\n      }\n      return s0;\n    }\n    function peg$parsebraceComment() {\n      var s0, s1, s2, s3, s4;\n      peg$silentFails++;\n      s0 = peg$currPos;\n      if (input.charCodeAt(peg$currPos) === 123) {\n        s1 = peg$c9;\n        peg$currPos++;\n      } else {\n        s1 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e24);\n        }\n      }\n      if (s1 !== peg$FAILED) {\n        s2 = peg$currPos;\n        s3 = [];\n        s4 = input.charAt(peg$currPos);\n        if (peg$r7.test(s4)) {\n          peg$currPos++;\n        } else {\n          s4 = peg$FAILED;\n          if (peg$silentFails === 0) {\n            peg$fail(peg$e25);\n          }\n        }\n        while (s4 !== peg$FAILED) {\n          s3.push(s4);\n          s4 = input.charAt(peg$currPos);\n          if (peg$r7.test(s4)) {\n            peg$currPos++;\n          } else {\n            s4 = peg$FAILED;\n            if (peg$silentFails === 0) {\n              peg$fail(peg$e25);\n            }\n          }\n        }\n        s2 = input.substring(s2, peg$currPos);\n        if (input.charCodeAt(peg$currPos) === 125) {\n          s3 = peg$c10;\n          peg$currPos++;\n        } else {\n          s3 = peg$FAILED;\n          if (peg$silentFails === 0) {\n            peg$fail(peg$e26);\n          }\n        }\n        if (s3 !== peg$FAILED) {\n          s0 = peg$f7(s2);\n        } else {\n          peg$currPos = s0;\n          s0 = peg$FAILED;\n        }\n      } else {\n        peg$currPos = s0;\n        s0 = peg$FAILED;\n      }\n      peg$silentFails--;\n      if (s0 === peg$FAILED) {\n        s1 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e23);\n        }\n      }\n      return s0;\n    }\n    function peg$parserestOfLineComment() {\n      var s0, s1, s2, s3, s4;\n      peg$silentFails++;\n      s0 = peg$currPos;\n      if (input.charCodeAt(peg$currPos) === 59) {\n        s1 = peg$c11;\n        peg$currPos++;\n      } else {\n        s1 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e28);\n        }\n      }\n      if (s1 !== peg$FAILED) {\n        s2 = peg$currPos;\n        s3 = [];\n        s4 = input.charAt(peg$currPos);\n        if (peg$r8.test(s4)) {\n          peg$currPos++;\n        } else {\n          s4 = peg$FAILED;\n          if (peg$silentFails === 0) {\n            peg$fail(peg$e29);\n          }\n        }\n        while (s4 !== peg$FAILED) {\n          s3.push(s4);\n          s4 = input.charAt(peg$currPos);\n          if (peg$r8.test(s4)) {\n            peg$currPos++;\n          } else {\n            s4 = peg$FAILED;\n            if (peg$silentFails === 0) {\n              peg$fail(peg$e29);\n            }\n          }\n        }\n        s2 = input.substring(s2, peg$currPos);\n        s0 = peg$f8(s2);\n      } else {\n        peg$currPos = s0;\n        s0 = peg$FAILED;\n      }\n      peg$silentFails--;\n      if (s0 === peg$FAILED) {\n        s1 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e27);\n        }\n      }\n      return s0;\n    }\n    function peg$parsevariation() {\n      var s0, s2, s3, s5;\n      peg$silentFails++;\n      s0 = peg$currPos;\n      peg$parse_();\n      if (input.charCodeAt(peg$currPos) === 40) {\n        s2 = peg$c12;\n        peg$currPos++;\n      } else {\n        s2 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e31);\n        }\n      }\n      if (s2 !== peg$FAILED) {\n        s3 = peg$parseline();\n        if (s3 !== peg$FAILED) {\n          peg$parse_();\n          if (input.charCodeAt(peg$currPos) === 41) {\n            s5 = peg$c13;\n            peg$currPos++;\n          } else {\n            s5 = peg$FAILED;\n            if (peg$silentFails === 0) {\n              peg$fail(peg$e32);\n            }\n          }\n          if (s5 !== peg$FAILED) {\n            s0 = peg$f9(s3);\n          } else {\n            peg$currPos = s0;\n            s0 = peg$FAILED;\n          }\n        } else {\n          peg$currPos = s0;\n          s0 = peg$FAILED;\n        }\n      } else {\n        peg$currPos = s0;\n        s0 = peg$FAILED;\n      }\n      peg$silentFails--;\n      if (s0 === peg$FAILED) {\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e30);\n        }\n      }\n      return s0;\n    }\n    function peg$parsegameTerminationMarker() {\n      var s0, s1, s3;\n      peg$silentFails++;\n      s0 = peg$currPos;\n      if (input.substr(peg$currPos, 3) === peg$c14) {\n        s1 = peg$c14;\n        peg$currPos += 3;\n      } else {\n        s1 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e34);\n        }\n      }\n      if (s1 === peg$FAILED) {\n        if (input.substr(peg$currPos, 3) === peg$c15) {\n          s1 = peg$c15;\n          peg$currPos += 3;\n        } else {\n          s1 = peg$FAILED;\n          if (peg$silentFails === 0) {\n            peg$fail(peg$e35);\n          }\n        }\n        if (s1 === peg$FAILED) {\n          if (input.substr(peg$currPos, 7) === peg$c16) {\n            s1 = peg$c16;\n            peg$currPos += 7;\n          } else {\n            s1 = peg$FAILED;\n            if (peg$silentFails === 0) {\n              peg$fail(peg$e36);\n            }\n          }\n          if (s1 === peg$FAILED) {\n            if (input.charCodeAt(peg$currPos) === 42) {\n              s1 = peg$c17;\n              peg$currPos++;\n            } else {\n              s1 = peg$FAILED;\n              if (peg$silentFails === 0) {\n                peg$fail(peg$e37);\n              }\n            }\n          }\n        }\n      }\n      if (s1 !== peg$FAILED) {\n        peg$parse_();\n        s3 = peg$parsecomment();\n        if (s3 === peg$FAILED) {\n          s3 = null;\n        }\n        s0 = peg$f10(s1, s3);\n      } else {\n        peg$currPos = s0;\n        s0 = peg$FAILED;\n      }\n      peg$silentFails--;\n      if (s0 === peg$FAILED) {\n        s1 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e33);\n        }\n      }\n      return s0;\n    }\n    function peg$parse_() {\n      var s0, s1;\n      peg$silentFails++;\n      s0 = [];\n      s1 = input.charAt(peg$currPos);\n      if (peg$r9.test(s1)) {\n        peg$currPos++;\n      } else {\n        s1 = peg$FAILED;\n        if (peg$silentFails === 0) {\n          peg$fail(peg$e39);\n        }\n      }\n      while (s1 !== peg$FAILED) {\n        s0.push(s1);\n        s1 = input.charAt(peg$currPos);\n        if (peg$r9.test(s1)) {\n          peg$currPos++;\n        } else {\n          s1 = peg$FAILED;\n          if (peg$silentFails === 0) {\n            peg$fail(peg$e39);\n          }\n        }\n      }\n      peg$silentFails--;\n      s1 = peg$FAILED;\n      if (peg$silentFails === 0) {\n        peg$fail(peg$e38);\n      }\n      return s0;\n    }\n    peg$result = peg$startRuleFunction();\n    if (options.peg$library) {\n      return (\n        /** @type {any} */\n        {\n          peg$result,\n          peg$currPos,\n          peg$FAILED,\n          peg$maxFailExpected,\n          peg$maxFailPos\n        }\n      );\n    }\n    if (peg$result !== peg$FAILED && peg$currPos === input.length) {\n      return peg$result;\n    } else {\n      if (peg$result !== peg$FAILED && peg$currPos < input.length) {\n        peg$fail(peg$endExpectation());\n      }\n      throw peg$buildStructuredError(\n        peg$maxFailExpected,\n        peg$maxFailPos < input.length ? input.charAt(peg$maxFailPos) : null,\n        peg$maxFailPos < input.length ? peg$computeLocation(peg$maxFailPos, peg$maxFailPos + 1) : peg$computeLocation(peg$maxFailPos, peg$maxFailPos)\n      );\n    }\n  }\n  var MASK64 = 0xffffffffffffffffn;\n  function rotl(x, k) {\n    return (x << k | x >> 64n - k) & 0xffffffffffffffffn;\n  }\n  function wrappingMul(x, y) {\n    return x * y & MASK64;\n  }\n  function xoroshiro128(state) {\n    return function() {\n      let s0 = BigInt(state & MASK64);\n      let s1 = BigInt(state >> 64n & MASK64);\n      const result = wrappingMul(rotl(wrappingMul(s0, 5n), 7n), 9n);\n      s1 ^= s0;\n      s0 = (rotl(s0, 24n) ^ s1 ^ s1 << 16n) & MASK64;\n      s1 = rotl(s1, 37n);\n      state = s1 << 64n | s0;\n      return result;\n    };\n  }\n  var rand = xoroshiro128(0xa187eb39cdcaed8f31c4b365b102e01en);\n  var PIECE_KEYS = Array.from({ length: 2 }, () => Array.from({ length: 6 }, () => Array.from({ length: 128 }, () => rand())));\n  var EP_KEYS = Array.from({ length: 8 }, () => rand());\n  var CASTLING_KEYS = Array.from({ length: 16 }, () => rand());\n  var SIDE_KEY = rand();\n  var WHITE = "w";\n  var BLACK = "b";\n  var PAWN = "p";\n  var KNIGHT = "n";\n  var BISHOP = "b";\n  var ROOK = "r";\n  var QUEEN = "q";\n  var KING = "k";\n  var DEFAULT_POSITION = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";\n  var Move = class {\n    constructor(chess, internal) {\n      __publicField(this, "color");\n      __publicField(this, "from");\n      __publicField(this, "to");\n      __publicField(this, "piece");\n      __publicField(this, "captured");\n      __publicField(this, "promotion");\n      /**\n       * @deprecated This field is deprecated and will be removed in version 2.0.0.\n       * Please use move descriptor functions instead: `isCapture`, `isPromotion`,\n       * `isEnPassant`, `isKingsideCastle`, `isQueensideCastle`, `isCastle`, and\n       * `isBigPawn`\n       */\n      __publicField(this, "flags");\n      __publicField(this, "san");\n      __publicField(this, "lan");\n      __publicField(this, "before");\n      __publicField(this, "after");\n      const { color, piece, from, to, flags, captured, promotion } = internal;\n      const fromAlgebraic = algebraic(from);\n      const toAlgebraic2 = algebraic(to);\n      this.color = color;\n      this.piece = piece;\n      this.from = fromAlgebraic;\n      this.to = toAlgebraic2;\n      this.san = chess["_moveToSan"](internal, chess["_moves"]({ legal: true }));\n      this.lan = fromAlgebraic + toAlgebraic2;\n      this.before = chess.fen();\n      chess["_makeMove"](internal);\n      this.after = chess.fen();\n      chess["_undoMove"]();\n      this.flags = "";\n      for (const flag in BITS) {\n        if (BITS[flag] & flags) {\n          this.flags += FLAGS[flag];\n        }\n      }\n      if (captured) {\n        this.captured = captured;\n      }\n      if (promotion) {\n        this.promotion = promotion;\n        this.lan += promotion;\n      }\n    }\n    isCapture() {\n      return this.flags.indexOf(FLAGS["CAPTURE"]) > -1;\n    }\n    isPromotion() {\n      return this.flags.indexOf(FLAGS["PROMOTION"]) > -1;\n    }\n    isEnPassant() {\n      return this.flags.indexOf(FLAGS["EP_CAPTURE"]) > -1;\n    }\n    isKingsideCastle() {\n      return this.flags.indexOf(FLAGS["KSIDE_CASTLE"]) > -1;\n    }\n    isQueensideCastle() {\n      return this.flags.indexOf(FLAGS["QSIDE_CASTLE"]) > -1;\n    }\n    isBigPawn() {\n      return this.flags.indexOf(FLAGS["BIG_PAWN"]) > -1;\n    }\n  };\n  var EMPTY = -1;\n  var FLAGS = {\n    NORMAL: "n",\n    CAPTURE: "c",\n    BIG_PAWN: "b",\n    EP_CAPTURE: "e",\n    PROMOTION: "p",\n    KSIDE_CASTLE: "k",\n    QSIDE_CASTLE: "q",\n    NULL_MOVE: "-"\n  };\n  var BITS = {\n    NORMAL: 1,\n    CAPTURE: 2,\n    BIG_PAWN: 4,\n    EP_CAPTURE: 8,\n    PROMOTION: 16,\n    KSIDE_CASTLE: 32,\n    QSIDE_CASTLE: 64,\n    NULL_MOVE: 128\n  };\n  var SEVEN_TAG_ROSTER = {\n    Event: "?",\n    Site: "?",\n    Date: "????.??.??",\n    Round: "?",\n    White: "?",\n    Black: "?",\n    Result: "*"\n  };\n  var SUPLEMENTAL_TAGS = {\n    WhiteTitle: null,\n    BlackTitle: null,\n    WhiteElo: null,\n    BlackElo: null,\n    WhiteUSCF: null,\n    BlackUSCF: null,\n    WhiteNA: null,\n    BlackNA: null,\n    WhiteType: null,\n    BlackType: null,\n    EventDate: null,\n    EventSponsor: null,\n    Section: null,\n    Stage: null,\n    Board: null,\n    Opening: null,\n    Variation: null,\n    SubVariation: null,\n    ECO: null,\n    NIC: null,\n    Time: null,\n    UTCTime: null,\n    UTCDate: null,\n    TimeControl: null,\n    SetUp: null,\n    FEN: null,\n    Termination: null,\n    Annotator: null,\n    Mode: null,\n    PlyCount: null\n  };\n  var HEADER_TEMPLATE = {\n    ...SEVEN_TAG_ROSTER,\n    ...SUPLEMENTAL_TAGS\n  };\n  var Ox88 = {\n    a8: 0,\n    b8: 1,\n    c8: 2,\n    d8: 3,\n    e8: 4,\n    f8: 5,\n    g8: 6,\n    h8: 7,\n    a7: 16,\n    b7: 17,\n    c7: 18,\n    d7: 19,\n    e7: 20,\n    f7: 21,\n    g7: 22,\n    h7: 23,\n    a6: 32,\n    b6: 33,\n    c6: 34,\n    d6: 35,\n    e6: 36,\n    f6: 37,\n    g6: 38,\n    h6: 39,\n    a5: 48,\n    b5: 49,\n    c5: 50,\n    d5: 51,\n    e5: 52,\n    f5: 53,\n    g5: 54,\n    h5: 55,\n    a4: 64,\n    b4: 65,\n    c4: 66,\n    d4: 67,\n    e4: 68,\n    f4: 69,\n    g4: 70,\n    h4: 71,\n    a3: 80,\n    b3: 81,\n    c3: 82,\n    d3: 83,\n    e3: 84,\n    f3: 85,\n    g3: 86,\n    h3: 87,\n    a2: 96,\n    b2: 97,\n    c2: 98,\n    d2: 99,\n    e2: 100,\n    f2: 101,\n    g2: 102,\n    h2: 103,\n    a1: 112,\n    b1: 113,\n    c1: 114,\n    d1: 115,\n    e1: 116,\n    f1: 117,\n    g1: 118,\n    h1: 119\n  };\n  var PAWN_OFFSETS = {\n    b: [16, 32, 17, 15],\n    w: [-16, -32, -17, -15]\n  };\n  var PIECE_OFFSETS = {\n    n: [-18, -33, -31, -14, 18, 33, 31, 14],\n    b: [-17, -15, 17, 15],\n    r: [-16, 1, 16, -1],\n    q: [-17, -16, -15, 1, 17, 16, 15, -1],\n    k: [-17, -16, -15, 1, 17, 16, 15, -1]\n  };\n  var ATTACKS = [\n    20,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    24,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    0,\n    24,\n    0,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    24,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    24,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    24,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    20,\n    2,\n    24,\n    2,\n    20,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    2,\n    53,\n    56,\n    53,\n    2,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    24,\n    24,\n    24,\n    24,\n    24,\n    24,\n    56,\n    0,\n    56,\n    24,\n    24,\n    24,\n    24,\n    24,\n    24,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    2,\n    53,\n    56,\n    53,\n    2,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    20,\n    2,\n    24,\n    2,\n    20,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    24,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    24,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    24,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    0,\n    24,\n    0,\n    0,\n    0,\n    0,\n    0,\n    20,\n    0,\n    0,\n    20,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    24,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    20\n  ];\n  var RAYS = [\n    17,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    16,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    15,\n    0,\n    0,\n    17,\n    0,\n    0,\n    0,\n    0,\n    0,\n    16,\n    0,\n    0,\n    0,\n    0,\n    0,\n    15,\n    0,\n    0,\n    0,\n    0,\n    17,\n    0,\n    0,\n    0,\n    0,\n    16,\n    0,\n    0,\n    0,\n    0,\n    15,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    17,\n    0,\n    0,\n    0,\n    16,\n    0,\n    0,\n    0,\n    15,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    17,\n    0,\n    0,\n    16,\n    0,\n    0,\n    15,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    17,\n    0,\n    16,\n    0,\n    15,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    17,\n    16,\n    15,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    1,\n    1,\n    1,\n    1,\n    1,\n    1,\n    1,\n    0,\n    -1,\n    -1,\n    -1,\n    -1,\n    -1,\n    -1,\n    -1,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    -15,\n    -16,\n    -17,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    -15,\n    0,\n    -16,\n    0,\n    -17,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    -15,\n    0,\n    0,\n    -16,\n    0,\n    0,\n    -17,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    -15,\n    0,\n    0,\n    0,\n    -16,\n    0,\n    0,\n    0,\n    -17,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    -15,\n    0,\n    0,\n    0,\n    0,\n    -16,\n    0,\n    0,\n    0,\n    0,\n    -17,\n    0,\n    0,\n    0,\n    0,\n    -15,\n    0,\n    0,\n    0,\n    0,\n    0,\n    -16,\n    0,\n    0,\n    0,\n    0,\n    0,\n    -17,\n    0,\n    0,\n    -15,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    -16,\n    0,\n    0,\n    0,\n    0,\n    0,\n    0,\n    -17\n  ];\n  var PIECE_MASKS = { p: 1, n: 2, b: 4, r: 8, q: 16, k: 32 };\n  var SYMBOLS = "pnbrqkPNBRQK";\n  var PROMOTIONS = [KNIGHT, BISHOP, ROOK, QUEEN];\n  var RANK_1 = 7;\n  var RANK_2 = 6;\n  var RANK_7 = 1;\n  var RANK_8 = 0;\n  var SIDES = {\n    [KING]: BITS.KSIDE_CASTLE,\n    [QUEEN]: BITS.QSIDE_CASTLE\n  };\n  var ROOKS = {\n    w: [\n      { square: Ox88.a1, flag: BITS.QSIDE_CASTLE },\n      { square: Ox88.h1, flag: BITS.KSIDE_CASTLE }\n    ],\n    b: [\n      { square: Ox88.a8, flag: BITS.QSIDE_CASTLE },\n      { square: Ox88.h8, flag: BITS.KSIDE_CASTLE }\n    ]\n  };\n  var SECOND_RANK = { b: RANK_7, w: RANK_2 };\n  var SAN_NULLMOVE = "--";\n  function rank(square) {\n    return square >> 4;\n  }\n  function file(square) {\n    return square & 15;\n  }\n  function isDigit(c) {\n    return "0123456789".indexOf(c) !== -1;\n  }\n  function algebraic(square) {\n    const f = file(square);\n    const r = rank(square);\n    return "abcdefgh".substring(f, f + 1) + "87654321".substring(r, r + 1);\n  }\n  function swapColor(color) {\n    return color === WHITE ? BLACK : WHITE;\n  }\n  function validateFen(fen) {\n    const tokens = fen.split(/\\s+/);\n    if (tokens.length !== 6) {\n      return {\n        ok: false,\n        error: "Invalid FEN: must contain six space-delimited fields"\n      };\n    }\n    const moveNumber = parseInt(tokens[5], 10);\n    if (isNaN(moveNumber) || moveNumber <= 0) {\n      return {\n        ok: false,\n        error: "Invalid FEN: move number must be a positive integer"\n      };\n    }\n    const halfMoves = parseInt(tokens[4], 10);\n    if (isNaN(halfMoves) || halfMoves < 0) {\n      return {\n        ok: false,\n        error: "Invalid FEN: half move counter number must be a non-negative integer"\n      };\n    }\n    if (!/^(-|[abcdefgh][36])$/.test(tokens[3])) {\n      return { ok: false, error: "Invalid FEN: en-passant square is invalid" };\n    }\n    if (/[^kKqQ-]/.test(tokens[2])) {\n      return { ok: false, error: "Invalid FEN: castling availability is invalid" };\n    }\n    if (!/^(w|b)$/.test(tokens[1])) {\n      return { ok: false, error: "Invalid FEN: side-to-move is invalid" };\n    }\n    const rows = tokens[0].split("/");\n    if (rows.length !== 8) {\n      return {\n        ok: false,\n        error: "Invalid FEN: piece data does not contain 8 \'/\'-delimited rows"\n      };\n    }\n    for (let i = 0; i < rows.length; i++) {\n      let sumFields = 0;\n      let previousWasNumber = false;\n      for (let k = 0; k < rows[i].length; k++) {\n        if (isDigit(rows[i][k])) {\n          if (previousWasNumber) {\n            return {\n              ok: false,\n              error: "Invalid FEN: piece data is invalid (consecutive number)"\n            };\n          }\n          sumFields += parseInt(rows[i][k], 10);\n          previousWasNumber = true;\n        } else {\n          if (!/^[prnbqkPRNBQK]$/.test(rows[i][k])) {\n            return {\n              ok: false,\n              error: "Invalid FEN: piece data is invalid (invalid piece)"\n            };\n          }\n          sumFields += 1;\n          previousWasNumber = false;\n        }\n      }\n      if (sumFields !== 8) {\n        return {\n          ok: false,\n          error: "Invalid FEN: piece data is invalid (too many squares in rank)"\n        };\n      }\n    }\n    if (tokens[3][1] == "3" && tokens[1] == "w" || tokens[3][1] == "6" && tokens[1] == "b") {\n      return { ok: false, error: "Invalid FEN: illegal en-passant square" };\n    }\n    const kings = [\n      { color: "white", regex: /K/g },\n      { color: "black", regex: /k/g }\n    ];\n    for (const { color, regex } of kings) {\n      if (!regex.test(tokens[0])) {\n        return { ok: false, error: `Invalid FEN: missing ${color} king` };\n      }\n      if ((tokens[0].match(regex) || []).length > 1) {\n        return { ok: false, error: `Invalid FEN: too many ${color} kings` };\n      }\n    }\n    if (Array.from(rows[0] + rows[7]).some((char) => char.toUpperCase() === "P")) {\n      return {\n        ok: false,\n        error: "Invalid FEN: some pawns are on the edge rows"\n      };\n    }\n    return { ok: true };\n  }\n  function getDisambiguator(move, moves) {\n    const from = move.from;\n    const to = move.to;\n    const piece = move.piece;\n    let ambiguities = 0;\n    let sameRank = 0;\n    let sameFile = 0;\n    for (let i = 0, len = moves.length; i < len; i++) {\n      const ambigFrom = moves[i].from;\n      const ambigTo = moves[i].to;\n      const ambigPiece = moves[i].piece;\n      if (piece === ambigPiece && from !== ambigFrom && to === ambigTo) {\n        ambiguities++;\n        if (rank(from) === rank(ambigFrom)) {\n          sameRank++;\n        }\n        if (file(from) === file(ambigFrom)) {\n          sameFile++;\n        }\n      }\n    }\n    if (ambiguities > 0) {\n      if (sameRank > 0 && sameFile > 0) {\n        return algebraic(from);\n      } else if (sameFile > 0) {\n        return algebraic(from).charAt(1);\n      } else {\n        return algebraic(from).charAt(0);\n      }\n    }\n    return "";\n  }\n  function addMove(moves, color, from, to, piece, captured = void 0, flags = BITS.NORMAL) {\n    const r = rank(to);\n    if (piece === PAWN && (r === RANK_1 || r === RANK_8)) {\n      for (let i = 0; i < PROMOTIONS.length; i++) {\n        const promotion = PROMOTIONS[i];\n        moves.push({\n          color,\n          from,\n          to,\n          piece,\n          captured,\n          promotion,\n          flags: flags | BITS.PROMOTION\n        });\n      }\n    } else {\n      moves.push({\n        color,\n        from,\n        to,\n        piece,\n        captured,\n        flags\n      });\n    }\n  }\n  function inferPieceType(san) {\n    let pieceType = san.charAt(0);\n    if (pieceType >= "a" && pieceType <= "h") {\n      const matches = san.match(/[a-h]\\d.*[a-h]\\d/);\n      if (matches) {\n        return void 0;\n      }\n      return PAWN;\n    }\n    pieceType = pieceType.toLowerCase();\n    if (pieceType === "o") {\n      return KING;\n    }\n    return pieceType;\n  }\n  function strippedSan(move) {\n    return move.replace(/=/, "").replace(/[+#]?[?!]*$/, "");\n  }\n  var Chess = class {\n    constructor(fen = DEFAULT_POSITION, { skipValidation = false } = {}) {\n      __publicField(this, "_board", new Array(128));\n      __publicField(this, "_turn", WHITE);\n      __publicField(this, "_header", {});\n      __publicField(this, "_kings", { w: EMPTY, b: EMPTY });\n      __publicField(this, "_epSquare", -1);\n      __publicField(this, "_halfMoves", 0);\n      __publicField(this, "_moveNumber", 0);\n      __publicField(this, "_history", []);\n      __publicField(this, "_comments", {});\n      __publicField(this, "_castling", { w: 0, b: 0 });\n      __publicField(this, "_hash", 0n);\n      // tracks number of times a position has been seen for repetition checking\n      __publicField(this, "_positionCount", /* @__PURE__ */ new Map());\n      this.load(fen, { skipValidation });\n    }\n    clear({ preserveHeaders = false } = {}) {\n      this._board = new Array(128);\n      this._kings = { w: EMPTY, b: EMPTY };\n      this._turn = WHITE;\n      this._castling = { w: 0, b: 0 };\n      this._epSquare = EMPTY;\n      this._halfMoves = 0;\n      this._moveNumber = 1;\n      this._history = [];\n      this._comments = {};\n      this._header = preserveHeaders ? this._header : { ...HEADER_TEMPLATE };\n      this._hash = this._computeHash();\n      this._positionCount = /* @__PURE__ */ new Map();\n      this._header["SetUp"] = null;\n      this._header["FEN"] = null;\n    }\n    load(fen, { skipValidation = false, preserveHeaders = false } = {}) {\n      let tokens = fen.split(/\\s+/);\n      if (tokens.length >= 2 && tokens.length < 6) {\n        const adjustments = ["-", "-", "0", "1"];\n        fen = tokens.concat(adjustments.slice(-(6 - tokens.length))).join(" ");\n      }\n      tokens = fen.split(/\\s+/);\n      if (!skipValidation) {\n        const { ok, error } = validateFen(fen);\n        if (!ok) {\n          throw new Error(error);\n        }\n      }\n      const position = tokens[0];\n      let square = 0;\n      this.clear({ preserveHeaders });\n      for (let i = 0; i < position.length; i++) {\n        const piece = position.charAt(i);\n        if (piece === "/") {\n          square += 8;\n        } else if (isDigit(piece)) {\n          square += parseInt(piece, 10);\n        } else {\n          const color = piece < "a" ? WHITE : BLACK;\n          this._put({ type: piece.toLowerCase(), color }, algebraic(square));\n          square++;\n        }\n      }\n      this._turn = tokens[1];\n      if (tokens[2].indexOf("K") > -1) {\n        this._castling.w |= BITS.KSIDE_CASTLE;\n      }\n      if (tokens[2].indexOf("Q") > -1) {\n        this._castling.w |= BITS.QSIDE_CASTLE;\n      }\n      if (tokens[2].indexOf("k") > -1) {\n        this._castling.b |= BITS.KSIDE_CASTLE;\n      }\n      if (tokens[2].indexOf("q") > -1) {\n        this._castling.b |= BITS.QSIDE_CASTLE;\n      }\n      this._epSquare = tokens[3] === "-" ? EMPTY : Ox88[tokens[3]];\n      this._halfMoves = parseInt(tokens[4], 10);\n      this._moveNumber = parseInt(tokens[5], 10);\n      this._hash = this._computeHash();\n      this._updateSetup(fen);\n      this._incPositionCount();\n    }\n    fen({ forceEnpassantSquare = false } = {}) {\n      let empty = 0;\n      let fen = "";\n      for (let i = Ox88.a8; i <= Ox88.h1; i++) {\n        if (this._board[i]) {\n          if (empty > 0) {\n            fen += empty;\n            empty = 0;\n          }\n          const { color, type: piece } = this._board[i];\n          fen += color === WHITE ? piece.toUpperCase() : piece.toLowerCase();\n        } else {\n          empty++;\n        }\n        if (i + 1 & 136) {\n          if (empty > 0) {\n            fen += empty;\n          }\n          if (i !== Ox88.h1) {\n            fen += "/";\n          }\n          empty = 0;\n          i += 8;\n        }\n      }\n      let castling = "";\n      if (this._castling[WHITE] & BITS.KSIDE_CASTLE) {\n        castling += "K";\n      }\n      if (this._castling[WHITE] & BITS.QSIDE_CASTLE) {\n        castling += "Q";\n      }\n      if (this._castling[BLACK] & BITS.KSIDE_CASTLE) {\n        castling += "k";\n      }\n      if (this._castling[BLACK] & BITS.QSIDE_CASTLE) {\n        castling += "q";\n      }\n      castling = castling || "-";\n      let epSquare = "-";\n      if (this._epSquare !== EMPTY) {\n        if (forceEnpassantSquare) {\n          epSquare = algebraic(this._epSquare);\n        } else {\n          const bigPawnSquare = this._epSquare + (this._turn === WHITE ? 16 : -16);\n          const squares = [bigPawnSquare + 1, bigPawnSquare - 1];\n          for (const square of squares) {\n            if (square & 136) {\n              continue;\n            }\n            const color = this._turn;\n            if (this._board[square]?.color === color && this._board[square]?.type === PAWN) {\n              this._makeMove({\n                color,\n                from: square,\n                to: this._epSquare,\n                piece: PAWN,\n                captured: PAWN,\n                flags: BITS.EP_CAPTURE\n              });\n              const isLegal = !this._isKingAttacked(color);\n              this._undoMove();\n              if (isLegal) {\n                epSquare = algebraic(this._epSquare);\n                break;\n              }\n            }\n          }\n        }\n      }\n      return [\n        fen,\n        this._turn,\n        castling,\n        epSquare,\n        this._halfMoves,\n        this._moveNumber\n      ].join(" ");\n    }\n    _pieceKey(i) {\n      if (!this._board[i]) {\n        return 0n;\n      }\n      const { color, type } = this._board[i];\n      const colorIndex = {\n        w: 0,\n        b: 1\n      }[color];\n      const typeIndex = {\n        p: 0,\n        n: 1,\n        b: 2,\n        r: 3,\n        q: 4,\n        k: 5\n      }[type];\n      return PIECE_KEYS[colorIndex][typeIndex][i];\n    }\n    _epKey() {\n      return this._epSquare === EMPTY ? 0n : EP_KEYS[this._epSquare & 7];\n    }\n    _castlingKey() {\n      const index = this._castling.w >> 5 | this._castling.b >> 3;\n      return CASTLING_KEYS[index];\n    }\n    _computeHash() {\n      let hash = 0n;\n      for (let i = Ox88.a8; i <= Ox88.h1; i++) {\n        if (i & 136) {\n          i += 7;\n          continue;\n        }\n        if (this._board[i]) {\n          hash ^= this._pieceKey(i);\n        }\n      }\n      hash ^= this._epKey();\n      hash ^= this._castlingKey();\n      if (this._turn === "b") {\n        hash ^= SIDE_KEY;\n      }\n      return hash;\n    }\n    /*\n     * Called when the initial board setup is changed with put() or remove().\n     * modifies the SetUp and FEN properties of the header object. If the FEN\n     * is equal to the default position, the SetUp and FEN are deleted the setup\n     * is only updated if history.length is zero, ie moves haven\'t been made.\n     */\n    _updateSetup(fen) {\n      if (this._history.length > 0)\n        return;\n      if (fen !== DEFAULT_POSITION) {\n        this._header["SetUp"] = "1";\n        this._header["FEN"] = fen;\n      } else {\n        this._header["SetUp"] = null;\n        this._header["FEN"] = null;\n      }\n    }\n    reset() {\n      this.load(DEFAULT_POSITION);\n    }\n    get(square) {\n      return this._board[Ox88[square]];\n    }\n    findPiece(piece) {\n      const squares = [];\n      for (let i = Ox88.a8; i <= Ox88.h1; i++) {\n        if (i & 136) {\n          i += 7;\n          continue;\n        }\n        if (!this._board[i] || this._board[i]?.color !== piece.color) {\n          continue;\n        }\n        if (this._board[i].color === piece.color && this._board[i].type === piece.type) {\n          squares.push(algebraic(i));\n        }\n      }\n      return squares;\n    }\n    put({ type, color }, square) {\n      if (this._put({ type, color }, square)) {\n        this._updateCastlingRights();\n        this._updateEnPassantSquare();\n        this._updateSetup(this.fen());\n        return true;\n      }\n      return false;\n    }\n    _set(sq, piece) {\n      this._hash ^= this._pieceKey(sq);\n      this._board[sq] = piece;\n      this._hash ^= this._pieceKey(sq);\n    }\n    _put({ type, color }, square) {\n      if (SYMBOLS.indexOf(type.toLowerCase()) === -1) {\n        return false;\n      }\n      if (!(square in Ox88)) {\n        return false;\n      }\n      const sq = Ox88[square];\n      if (type == KING && !(this._kings[color] == EMPTY || this._kings[color] == sq)) {\n        return false;\n      }\n      const currentPieceOnSquare = this._board[sq];\n      if (currentPieceOnSquare && currentPieceOnSquare.type === KING) {\n        this._kings[currentPieceOnSquare.color] = EMPTY;\n      }\n      this._set(sq, { type, color });\n      if (type === KING) {\n        this._kings[color] = sq;\n      }\n      return true;\n    }\n    _clear(sq) {\n      this._hash ^= this._pieceKey(sq);\n      delete this._board[sq];\n    }\n    remove(square) {\n      const piece = this.get(square);\n      this._clear(Ox88[square]);\n      if (piece && piece.type === KING) {\n        this._kings[piece.color] = EMPTY;\n      }\n      this._updateCastlingRights();\n      this._updateEnPassantSquare();\n      this._updateSetup(this.fen());\n      return piece;\n    }\n    _updateCastlingRights() {\n      this._hash ^= this._castlingKey();\n      const whiteKingInPlace = this._board[Ox88.e1]?.type === KING && this._board[Ox88.e1]?.color === WHITE;\n      const blackKingInPlace = this._board[Ox88.e8]?.type === KING && this._board[Ox88.e8]?.color === BLACK;\n      if (!whiteKingInPlace || this._board[Ox88.a1]?.type !== ROOK || this._board[Ox88.a1]?.color !== WHITE) {\n        this._castling.w &= -65;\n      }\n      if (!whiteKingInPlace || this._board[Ox88.h1]?.type !== ROOK || this._board[Ox88.h1]?.color !== WHITE) {\n        this._castling.w &= -33;\n      }\n      if (!blackKingInPlace || this._board[Ox88.a8]?.type !== ROOK || this._board[Ox88.a8]?.color !== BLACK) {\n        this._castling.b &= -65;\n      }\n      if (!blackKingInPlace || this._board[Ox88.h8]?.type !== ROOK || this._board[Ox88.h8]?.color !== BLACK) {\n        this._castling.b &= -33;\n      }\n      this._hash ^= this._castlingKey();\n    }\n    _updateEnPassantSquare() {\n      if (this._epSquare === EMPTY) {\n        return;\n      }\n      const startSquare = this._epSquare + (this._turn === WHITE ? -16 : 16);\n      const currentSquare = this._epSquare + (this._turn === WHITE ? 16 : -16);\n      const attackers = [currentSquare + 1, currentSquare - 1];\n      if (this._board[startSquare] !== null || this._board[this._epSquare] !== null || this._board[currentSquare]?.color !== swapColor(this._turn) || this._board[currentSquare]?.type !== PAWN) {\n        this._hash ^= this._epKey();\n        this._epSquare = EMPTY;\n        return;\n      }\n      const canCapture = (square) => !(square & 136) && this._board[square]?.color === this._turn && this._board[square]?.type === PAWN;\n      if (!attackers.some(canCapture)) {\n        this._hash ^= this._epKey();\n        this._epSquare = EMPTY;\n      }\n    }\n    _attacked(color, square, verbose) {\n      const attackers = [];\n      for (let i = Ox88.a8; i <= Ox88.h1; i++) {\n        if (i & 136) {\n          i += 7;\n          continue;\n        }\n        if (this._board[i] === void 0 || this._board[i].color !== color) {\n          continue;\n        }\n        const piece = this._board[i];\n        const difference = i - square;\n        if (difference === 0) {\n          continue;\n        }\n        const index = difference + 119;\n        if (ATTACKS[index] & PIECE_MASKS[piece.type]) {\n          if (piece.type === PAWN) {\n            if (difference > 0 && piece.color === WHITE || difference <= 0 && piece.color === BLACK) {\n              if (!verbose) {\n                return true;\n              } else {\n                attackers.push(algebraic(i));\n              }\n            }\n            continue;\n          }\n          if (piece.type === "n" || piece.type === "k") {\n            if (!verbose) {\n              return true;\n            } else {\n              attackers.push(algebraic(i));\n              continue;\n            }\n          }\n          const offset = RAYS[index];\n          let j = i + offset;\n          let blocked = false;\n          while (j !== square) {\n            if (this._board[j] != null) {\n              blocked = true;\n              break;\n            }\n            j += offset;\n          }\n          if (!blocked) {\n            if (!verbose) {\n              return true;\n            } else {\n              attackers.push(algebraic(i));\n              continue;\n            }\n          }\n        }\n      }\n      if (verbose) {\n        return attackers;\n      } else {\n        return false;\n      }\n    }\n    attackers(square, attackedBy) {\n      if (!attackedBy) {\n        return this._attacked(this._turn, Ox88[square], true);\n      } else {\n        return this._attacked(attackedBy, Ox88[square], true);\n      }\n    }\n    _isKingAttacked(color) {\n      const square = this._kings[color];\n      return square === -1 ? false : this._attacked(swapColor(color), square);\n    }\n    hash() {\n      return this._hash.toString(16);\n    }\n    isAttacked(square, attackedBy) {\n      return this._attacked(attackedBy, Ox88[square]);\n    }\n    isCheck() {\n      return this._isKingAttacked(this._turn);\n    }\n    inCheck() {\n      return this.isCheck();\n    }\n    isCheckmate() {\n      return this.isCheck() && this._moves().length === 0;\n    }\n    isStalemate() {\n      return !this.isCheck() && this._moves().length === 0;\n    }\n    isInsufficientMaterial() {\n      const pieces = {\n        b: 0,\n        n: 0,\n        r: 0,\n        q: 0,\n        k: 0,\n        p: 0\n      };\n      const bishops = [];\n      let numPieces = 0;\n      let squareColor = 0;\n      for (let i = Ox88.a8; i <= Ox88.h1; i++) {\n        squareColor = (squareColor + 1) % 2;\n        if (i & 136) {\n          i += 7;\n          continue;\n        }\n        const piece = this._board[i];\n        if (piece) {\n          pieces[piece.type] = piece.type in pieces ? pieces[piece.type] + 1 : 1;\n          if (piece.type === BISHOP) {\n            bishops.push(squareColor);\n          }\n          numPieces++;\n        }\n      }\n      if (numPieces === 2) {\n        return true;\n      } else if (\n        // k vs. kn .... or .... k vs. kb\n        numPieces === 3 && (pieces[BISHOP] === 1 || pieces[KNIGHT] === 1)\n      ) {\n        return true;\n      } else if (numPieces === pieces[BISHOP] + 2) {\n        let sum = 0;\n        const len = bishops.length;\n        for (let i = 0; i < len; i++) {\n          sum += bishops[i];\n        }\n        if (sum === 0 || sum === len) {\n          return true;\n        }\n      }\n      return false;\n    }\n    isThreefoldRepetition() {\n      return this._getPositionCount(this._hash) >= 3;\n    }\n    isDrawByFiftyMoves() {\n      return this._halfMoves >= 100;\n    }\n    isDraw() {\n      return this.isDrawByFiftyMoves() || this.isStalemate() || this.isInsufficientMaterial() || this.isThreefoldRepetition();\n    }\n    isGameOver() {\n      return this.isCheckmate() || this.isDraw();\n    }\n    moves({ verbose = false, square = void 0, piece = void 0 } = {}) {\n      const moves = this._moves({ square, piece });\n      if (verbose) {\n        return moves.map((move) => new Move(this, move));\n      } else {\n        return moves.map((move) => this._moveToSan(move, moves));\n      }\n    }\n    _moves({ legal = true, piece = void 0, square = void 0 } = {}) {\n      const forSquare = square ? square.toLowerCase() : void 0;\n      const forPiece = piece?.toLowerCase();\n      const moves = [];\n      const us = this._turn;\n      const them = swapColor(us);\n      let firstSquare = Ox88.a8;\n      let lastSquare = Ox88.h1;\n      let singleSquare = false;\n      if (forSquare) {\n        if (!(forSquare in Ox88)) {\n          return [];\n        } else {\n          firstSquare = lastSquare = Ox88[forSquare];\n          singleSquare = true;\n        }\n      }\n      for (let from = firstSquare; from <= lastSquare; from++) {\n        if (from & 136) {\n          from += 7;\n          continue;\n        }\n        if (!this._board[from] || this._board[from].color === them) {\n          continue;\n        }\n        const { type } = this._board[from];\n        let to;\n        if (type === PAWN) {\n          if (forPiece && forPiece !== type)\n            continue;\n          to = from + PAWN_OFFSETS[us][0];\n          if (!this._board[to]) {\n            addMove(moves, us, from, to, PAWN);\n            to = from + PAWN_OFFSETS[us][1];\n            if (SECOND_RANK[us] === rank(from) && !this._board[to]) {\n              addMove(moves, us, from, to, PAWN, void 0, BITS.BIG_PAWN);\n            }\n          }\n          for (let j = 2; j < 4; j++) {\n            to = from + PAWN_OFFSETS[us][j];\n            if (to & 136)\n              continue;\n            if (this._board[to]?.color === them) {\n              addMove(moves, us, from, to, PAWN, this._board[to].type, BITS.CAPTURE);\n            } else if (to === this._epSquare) {\n              addMove(moves, us, from, to, PAWN, PAWN, BITS.EP_CAPTURE);\n            }\n          }\n        } else {\n          if (forPiece && forPiece !== type)\n            continue;\n          for (let j = 0, len = PIECE_OFFSETS[type].length; j < len; j++) {\n            const offset = PIECE_OFFSETS[type][j];\n            to = from;\n            while (true) {\n              to += offset;\n              if (to & 136)\n                break;\n              if (!this._board[to]) {\n                addMove(moves, us, from, to, type);\n              } else {\n                if (this._board[to].color === us)\n                  break;\n                addMove(moves, us, from, to, type, this._board[to].type, BITS.CAPTURE);\n                break;\n              }\n              if (type === KNIGHT || type === KING)\n                break;\n            }\n          }\n        }\n      }\n      if (forPiece === void 0 || forPiece === KING) {\n        if (!singleSquare || lastSquare === this._kings[us]) {\n          if (this._castling[us] & BITS.KSIDE_CASTLE) {\n            const castlingFrom = this._kings[us];\n            const castlingTo = castlingFrom + 2;\n            if (!this._board[castlingFrom + 1] && !this._board[castlingTo] && !this._attacked(them, this._kings[us]) && !this._attacked(them, castlingFrom + 1) && !this._attacked(them, castlingTo)) {\n              addMove(moves, us, this._kings[us], castlingTo, KING, void 0, BITS.KSIDE_CASTLE);\n            }\n          }\n          if (this._castling[us] & BITS.QSIDE_CASTLE) {\n            const castlingFrom = this._kings[us];\n            const castlingTo = castlingFrom - 2;\n            if (!this._board[castlingFrom - 1] && !this._board[castlingFrom - 2] && !this._board[castlingFrom - 3] && !this._attacked(them, this._kings[us]) && !this._attacked(them, castlingFrom - 1) && !this._attacked(them, castlingTo)) {\n              addMove(moves, us, this._kings[us], castlingTo, KING, void 0, BITS.QSIDE_CASTLE);\n            }\n          }\n        }\n      }\n      if (!legal || this._kings[us] === -1) {\n        return moves;\n      }\n      const legalMoves = [];\n      for (let i = 0, len = moves.length; i < len; i++) {\n        this._makeMove(moves[i]);\n        if (!this._isKingAttacked(us)) {\n          legalMoves.push(moves[i]);\n        }\n        this._undoMove();\n      }\n      return legalMoves;\n    }\n    move(move, { strict = false } = {}) {\n      let moveObj = null;\n      if (typeof move === "string") {\n        moveObj = this._moveFromSan(move, strict);\n      } else if (move === null) {\n        moveObj = this._moveFromSan(SAN_NULLMOVE, strict);\n      } else if (typeof move === "object") {\n        const moves = this._moves();\n        for (let i = 0, len = moves.length; i < len; i++) {\n          if (move.from === algebraic(moves[i].from) && move.to === algebraic(moves[i].to) && (!("promotion" in moves[i]) || move.promotion === moves[i].promotion)) {\n            moveObj = moves[i];\n            break;\n          }\n        }\n      }\n      if (!moveObj) {\n        if (typeof move === "string") {\n          throw new Error(`Invalid move: ${move}`);\n        } else {\n          throw new Error(`Invalid move: ${JSON.stringify(move)}`);\n        }\n      }\n      if (this.isCheck() && moveObj.flags & BITS.NULL_MOVE) {\n        throw new Error("Null move not allowed when in check");\n      }\n      const prettyMove = new Move(this, moveObj);\n      this._makeMove(moveObj);\n      this._incPositionCount();\n      return prettyMove;\n    }\n    _push(move) {\n      this._history.push({\n        move,\n        kings: { b: this._kings.b, w: this._kings.w },\n        turn: this._turn,\n        castling: { b: this._castling.b, w: this._castling.w },\n        epSquare: this._epSquare,\n        halfMoves: this._halfMoves,\n        moveNumber: this._moveNumber\n      });\n    }\n    _movePiece(from, to) {\n      this._hash ^= this._pieceKey(from);\n      this._board[to] = this._board[from];\n      delete this._board[from];\n      this._hash ^= this._pieceKey(to);\n    }\n    _makeMove(move) {\n      const us = this._turn;\n      const them = swapColor(us);\n      this._push(move);\n      if (move.flags & BITS.NULL_MOVE) {\n        if (us === BLACK) {\n          this._moveNumber++;\n        }\n        this._halfMoves++;\n        this._turn = them;\n        this._epSquare = EMPTY;\n        return;\n      }\n      this._hash ^= this._epKey();\n      this._hash ^= this._castlingKey();\n      if (move.captured) {\n        this._hash ^= this._pieceKey(move.to);\n      }\n      this._movePiece(move.from, move.to);\n      if (move.flags & BITS.EP_CAPTURE) {\n        if (this._turn === BLACK) {\n          this._clear(move.to - 16);\n        } else {\n          this._clear(move.to + 16);\n        }\n      }\n      if (move.promotion) {\n        this._clear(move.to);\n        this._set(move.to, { type: move.promotion, color: us });\n      }\n      if (this._board[move.to].type === KING) {\n        this._kings[us] = move.to;\n        if (move.flags & BITS.KSIDE_CASTLE) {\n          const castlingTo = move.to - 1;\n          const castlingFrom = move.to + 1;\n          this._movePiece(castlingFrom, castlingTo);\n        } else if (move.flags & BITS.QSIDE_CASTLE) {\n          const castlingTo = move.to + 1;\n          const castlingFrom = move.to - 2;\n          this._movePiece(castlingFrom, castlingTo);\n        }\n        this._castling[us] = 0;\n      }\n      if (this._castling[us]) {\n        for (let i = 0, len = ROOKS[us].length; i < len; i++) {\n          if (move.from === ROOKS[us][i].square && this._castling[us] & ROOKS[us][i].flag) {\n            this._castling[us] ^= ROOKS[us][i].flag;\n            break;\n          }\n        }\n      }\n      if (this._castling[them]) {\n        for (let i = 0, len = ROOKS[them].length; i < len; i++) {\n          if (move.to === ROOKS[them][i].square && this._castling[them] & ROOKS[them][i].flag) {\n            this._castling[them] ^= ROOKS[them][i].flag;\n            break;\n          }\n        }\n      }\n      this._hash ^= this._castlingKey();\n      if (move.flags & BITS.BIG_PAWN) {\n        let epSquare;\n        if (us === BLACK) {\n          epSquare = move.to - 16;\n        } else {\n          epSquare = move.to + 16;\n        }\n        if (!(move.to - 1 & 136) && this._board[move.to - 1]?.type === PAWN && this._board[move.to - 1]?.color === them || !(move.to + 1 & 136) && this._board[move.to + 1]?.type === PAWN && this._board[move.to + 1]?.color === them) {\n          this._epSquare = epSquare;\n          this._hash ^= this._epKey();\n        } else {\n          this._epSquare = EMPTY;\n        }\n      } else {\n        this._epSquare = EMPTY;\n      }\n      if (move.piece === PAWN) {\n        this._halfMoves = 0;\n      } else if (move.flags & (BITS.CAPTURE | BITS.EP_CAPTURE)) {\n        this._halfMoves = 0;\n      } else {\n        this._halfMoves++;\n      }\n      if (us === BLACK) {\n        this._moveNumber++;\n      }\n      this._turn = them;\n      this._hash ^= SIDE_KEY;\n    }\n    undo() {\n      const hash = this._hash;\n      const move = this._undoMove();\n      if (move) {\n        const prettyMove = new Move(this, move);\n        this._decPositionCount(hash);\n        return prettyMove;\n      }\n      return null;\n    }\n    _undoMove() {\n      const old = this._history.pop();\n      if (old === void 0) {\n        return null;\n      }\n      this._hash ^= this._epKey();\n      this._hash ^= this._castlingKey();\n      const move = old.move;\n      this._kings = old.kings;\n      this._turn = old.turn;\n      this._castling = old.castling;\n      this._epSquare = old.epSquare;\n      this._halfMoves = old.halfMoves;\n      this._moveNumber = old.moveNumber;\n      this._hash ^= this._epKey();\n      this._hash ^= this._castlingKey();\n      this._hash ^= SIDE_KEY;\n      const us = this._turn;\n      const them = swapColor(us);\n      if (move.flags & BITS.NULL_MOVE) {\n        return move;\n      }\n      this._movePiece(move.to, move.from);\n      if (move.piece) {\n        this._clear(move.from);\n        this._set(move.from, { type: move.piece, color: us });\n      }\n      if (move.captured) {\n        if (move.flags & BITS.EP_CAPTURE) {\n          let index;\n          if (us === BLACK) {\n            index = move.to - 16;\n          } else {\n            index = move.to + 16;\n          }\n          this._set(index, { type: PAWN, color: them });\n        } else {\n          this._set(move.to, { type: move.captured, color: them });\n        }\n      }\n      if (move.flags & (BITS.KSIDE_CASTLE | BITS.QSIDE_CASTLE)) {\n        let castlingTo, castlingFrom;\n        if (move.flags & BITS.KSIDE_CASTLE) {\n          castlingTo = move.to + 1;\n          castlingFrom = move.to - 1;\n        } else {\n          castlingTo = move.to - 2;\n          castlingFrom = move.to + 1;\n        }\n        this._movePiece(castlingFrom, castlingTo);\n      }\n      return move;\n    }\n    pgn({ newline = "\\n", maxWidth = 0 } = {}) {\n      const result = [];\n      let headerExists = false;\n      for (const i in this._header) {\n        const headerTag = this._header[i];\n        if (headerTag)\n          result.push(`[${i} "${this._header[i]}"]` + newline);\n        headerExists = true;\n      }\n      if (headerExists && this._history.length) {\n        result.push(newline);\n      }\n      const appendComment = (moveString2) => {\n        const comment = this._comments[this.fen()];\n        if (typeof comment !== "undefined") {\n          const delimiter = moveString2.length > 0 ? " " : "";\n          moveString2 = `${moveString2}${delimiter}{${comment}}`;\n        }\n        return moveString2;\n      };\n      const reversedHistory = [];\n      while (this._history.length > 0) {\n        reversedHistory.push(this._undoMove());\n      }\n      const moves = [];\n      let moveString = "";\n      if (reversedHistory.length === 0) {\n        moves.push(appendComment(""));\n      }\n      while (reversedHistory.length > 0) {\n        moveString = appendComment(moveString);\n        const move = reversedHistory.pop();\n        if (!move) {\n          break;\n        }\n        if (!this._history.length && move.color === "b") {\n          const prefix = `${this._moveNumber}. ...`;\n          moveString = moveString ? `${moveString} ${prefix}` : prefix;\n        } else if (move.color === "w") {\n          if (moveString.length) {\n            moves.push(moveString);\n          }\n          moveString = this._moveNumber + ".";\n        }\n        moveString = moveString + " " + this._moveToSan(move, this._moves({ legal: true }));\n        this._makeMove(move);\n      }\n      if (moveString.length) {\n        moves.push(appendComment(moveString));\n      }\n      moves.push(this._header.Result || "*");\n      if (maxWidth === 0) {\n        return result.join("") + moves.join(" ");\n      }\n      const strip = function() {\n        if (result.length > 0 && result[result.length - 1] === " ") {\n          result.pop();\n          return true;\n        }\n        return false;\n      };\n      const wrapComment = function(width, move) {\n        for (const token of move.split(" ")) {\n          if (!token) {\n            continue;\n          }\n          if (width + token.length > maxWidth) {\n            while (strip()) {\n              width--;\n            }\n            result.push(newline);\n            width = 0;\n          }\n          result.push(token);\n          width += token.length;\n          result.push(" ");\n          width++;\n        }\n        if (strip()) {\n          width--;\n        }\n        return width;\n      };\n      let currentWidth = 0;\n      for (let i = 0; i < moves.length; i++) {\n        if (currentWidth + moves[i].length > maxWidth) {\n          if (moves[i].includes("{")) {\n            currentWidth = wrapComment(currentWidth, moves[i]);\n            continue;\n          }\n        }\n        if (currentWidth + moves[i].length > maxWidth && i !== 0) {\n          if (result[result.length - 1] === " ") {\n            result.pop();\n          }\n          result.push(newline);\n          currentWidth = 0;\n        } else if (i !== 0) {\n          result.push(" ");\n          currentWidth++;\n        }\n        result.push(moves[i]);\n        currentWidth += moves[i].length;\n      }\n      return result.join("");\n    }\n    /**\n     * @deprecated Use `setHeader` and `getHeaders` instead. This method will return null header tags (which is not what you want)\n     */\n    header(...args) {\n      for (let i = 0; i < args.length; i += 2) {\n        if (typeof args[i] === "string" && typeof args[i + 1] === "string") {\n          this._header[args[i]] = args[i + 1];\n        }\n      }\n      return this._header;\n    }\n    // TODO: value validation per spec\n    setHeader(key, value) {\n      this._header[key] = value ?? SEVEN_TAG_ROSTER[key] ?? null;\n      return this.getHeaders();\n    }\n    removeHeader(key) {\n      if (key in this._header) {\n        this._header[key] = SEVEN_TAG_ROSTER[key] || null;\n        return true;\n      }\n      return false;\n    }\n    // return only non-null headers (omit placemarker nulls)\n    getHeaders() {\n      const nonNullHeaders = {};\n      for (const [key, value] of Object.entries(this._header)) {\n        if (value !== null) {\n          nonNullHeaders[key] = value;\n        }\n      }\n      return nonNullHeaders;\n    }\n    loadPgn(pgn2, { strict = false, newlineChar = "\\r?\\n" } = {}) {\n      if (newlineChar !== "\\r?\\n") {\n        pgn2 = pgn2.replace(new RegExp(newlineChar, "g"), "\\n");\n      }\n      const parsedPgn = peg$parse(pgn2);\n      this.reset();\n      const headers = parsedPgn.headers;\n      let fen = "";\n      for (const key in headers) {\n        if (key.toLowerCase() === "fen") {\n          fen = headers[key];\n        }\n        this.header(key, headers[key]);\n      }\n      if (!strict) {\n        if (fen) {\n          this.load(fen, { preserveHeaders: true });\n        }\n      } else {\n        if (headers["SetUp"] === "1") {\n          if (!("FEN" in headers)) {\n            throw new Error("Invalid PGN: FEN tag must be supplied with SetUp tag");\n          }\n          this.load(headers["FEN"], { preserveHeaders: true });\n        }\n      }\n      let node2 = parsedPgn.root;\n      while (node2) {\n        if (node2.move) {\n          const move = this._moveFromSan(node2.move, strict);\n          if (move == null) {\n            throw new Error(`Invalid move in PGN: ${node2.move}`);\n          } else {\n            this._makeMove(move);\n            this._incPositionCount();\n          }\n        }\n        if (node2.comment !== void 0) {\n          this._comments[this.fen()] = node2.comment;\n        }\n        node2 = node2.variations[0];\n      }\n      const result = parsedPgn.result;\n      if (result && Object.keys(this._header).length && this._header["Result"] !== result) {\n        this.setHeader("Result", result);\n      }\n    }\n    /*\n     * Convert a move from 0x88 coordinates to Standard Algebraic Notation\n     * (SAN)\n     *\n     * @param {boolean} strict Use the strict SAN parser. It will throw errors\n     * on overly disambiguated moves (see below):\n     *\n     * r1bqkbnr/ppp2ppp/2n5/1B1pP3/4P3/8/PPPP2PP/RNBQK1NR b KQkq - 2 4\n     * 4. ... Nge7 is overly disambiguated because the knight on c6 is pinned\n     * 4. ... Ne7 is technically the valid SAN\n     */\n    _moveToSan(move, moves) {\n      let output = "";\n      if (move.flags & BITS.KSIDE_CASTLE) {\n        output = "O-O";\n      } else if (move.flags & BITS.QSIDE_CASTLE) {\n        output = "O-O-O";\n      } else if (move.flags & BITS.NULL_MOVE) {\n        return SAN_NULLMOVE;\n      } else {\n        if (move.piece !== PAWN) {\n          const disambiguator = getDisambiguator(move, moves);\n          output += move.piece.toUpperCase() + disambiguator;\n        }\n        if (move.flags & (BITS.CAPTURE | BITS.EP_CAPTURE)) {\n          if (move.piece === PAWN) {\n            output += algebraic(move.from)[0];\n          }\n          output += "x";\n        }\n        output += algebraic(move.to);\n        if (move.promotion) {\n          output += "=" + move.promotion.toUpperCase();\n        }\n      }\n      this._makeMove(move);\n      if (this.isCheck()) {\n        if (this.isCheckmate()) {\n          output += "#";\n        } else {\n          output += "+";\n        }\n      }\n      this._undoMove();\n      return output;\n    }\n    // convert a move from Standard Algebraic Notation (SAN) to 0x88 coordinates\n    _moveFromSan(move, strict = false) {\n      let cleanMove = strippedSan(move);\n      if (!strict) {\n        if (cleanMove === "0-0") {\n          cleanMove = "O-O";\n        } else if (cleanMove === "0-0-0") {\n          cleanMove = "O-O-O";\n        }\n      }\n      if (cleanMove == SAN_NULLMOVE) {\n        const res = {\n          color: this._turn,\n          from: 0,\n          to: 0,\n          piece: "k",\n          flags: BITS.NULL_MOVE\n        };\n        return res;\n      }\n      let pieceType = inferPieceType(cleanMove);\n      let moves = this._moves({ legal: true, piece: pieceType });\n      for (let i = 0, len = moves.length; i < len; i++) {\n        if (cleanMove === strippedSan(this._moveToSan(moves[i], moves))) {\n          return moves[i];\n        }\n      }\n      if (strict) {\n        return null;\n      }\n      let piece = void 0;\n      let matches = void 0;\n      let from = void 0;\n      let to = void 0;\n      let promotion = void 0;\n      let overlyDisambiguated = false;\n      matches = cleanMove.match(/([pnbrqkPNBRQK])?([a-h][1-8])x?-?([a-h][1-8])([qrbnQRBN])?/);\n      if (matches) {\n        piece = matches[1];\n        from = matches[2];\n        to = matches[3];\n        promotion = matches[4];\n        if (from.length == 1) {\n          overlyDisambiguated = true;\n        }\n      } else {\n        matches = cleanMove.match(/([pnbrqkPNBRQK])?([a-h]?[1-8]?)x?-?([a-h][1-8])([qrbnQRBN])?/);\n        if (matches) {\n          piece = matches[1];\n          from = matches[2];\n          to = matches[3];\n          promotion = matches[4];\n          if (from.length == 1) {\n            overlyDisambiguated = true;\n          }\n        }\n      }\n      pieceType = inferPieceType(cleanMove);\n      moves = this._moves({\n        legal: true,\n        piece: piece ? piece : pieceType\n      });\n      if (!to) {\n        return null;\n      }\n      for (let i = 0, len = moves.length; i < len; i++) {\n        if (!from) {\n          if (cleanMove === strippedSan(this._moveToSan(moves[i], moves)).replace("x", "")) {\n            return moves[i];\n          }\n        } else if ((!piece || piece.toLowerCase() == moves[i].piece) && Ox88[from] == moves[i].from && Ox88[to] == moves[i].to && (!promotion || promotion.toLowerCase() == moves[i].promotion)) {\n          return moves[i];\n        } else if (overlyDisambiguated) {\n          const square = algebraic(moves[i].from);\n          if ((!piece || piece.toLowerCase() == moves[i].piece) && Ox88[to] == moves[i].to && (from == square[0] || from == square[1]) && (!promotion || promotion.toLowerCase() == moves[i].promotion)) {\n            return moves[i];\n          }\n        }\n      }\n      return null;\n    }\n    ascii() {\n      let s = "   +------------------------+\\n";\n      for (let i = Ox88.a8; i <= Ox88.h1; i++) {\n        if (file(i) === 0) {\n          s += " " + "87654321"[rank(i)] + " |";\n        }\n        if (this._board[i]) {\n          const piece = this._board[i].type;\n          const color = this._board[i].color;\n          const symbol = color === WHITE ? piece.toUpperCase() : piece.toLowerCase();\n          s += " " + symbol + " ";\n        } else {\n          s += " . ";\n        }\n        if (i + 1 & 136) {\n          s += "|\\n";\n          i += 8;\n        }\n      }\n      s += "   +------------------------+\\n";\n      s += "     a  b  c  d  e  f  g  h";\n      return s;\n    }\n    perft(depth) {\n      const moves = this._moves({ legal: false });\n      let nodes = 0;\n      const color = this._turn;\n      for (let i = 0, len = moves.length; i < len; i++) {\n        this._makeMove(moves[i]);\n        if (!this._isKingAttacked(color)) {\n          if (depth - 1 > 0) {\n            nodes += this.perft(depth - 1);\n          } else {\n            nodes++;\n          }\n        }\n        this._undoMove();\n      }\n      return nodes;\n    }\n    setTurn(color) {\n      if (this._turn == color) {\n        return false;\n      }\n      this.move("--");\n      return true;\n    }\n    turn() {\n      return this._turn;\n    }\n    board() {\n      const output = [];\n      let row = [];\n      for (let i = Ox88.a8; i <= Ox88.h1; i++) {\n        if (this._board[i] == null) {\n          row.push(null);\n        } else {\n          row.push({\n            square: algebraic(i),\n            type: this._board[i].type,\n            color: this._board[i].color\n          });\n        }\n        if (i + 1 & 136) {\n          output.push(row);\n          row = [];\n          i += 8;\n        }\n      }\n      return output;\n    }\n    squareColor(square) {\n      if (square in Ox88) {\n        const sq = Ox88[square];\n        return (rank(sq) + file(sq)) % 2 === 0 ? "light" : "dark";\n      }\n      return null;\n    }\n    history({ verbose = false } = {}) {\n      const reversedHistory = [];\n      const moveHistory = [];\n      while (this._history.length > 0) {\n        reversedHistory.push(this._undoMove());\n      }\n      while (true) {\n        const move = reversedHistory.pop();\n        if (!move) {\n          break;\n        }\n        if (verbose) {\n          moveHistory.push(new Move(this, move));\n        } else {\n          moveHistory.push(this._moveToSan(move, this._moves()));\n        }\n        this._makeMove(move);\n      }\n      return moveHistory;\n    }\n    /*\n     * Keeps track of position occurrence counts for the purpose of repetition\n     * checking. Old positions are removed from the map if their counts are reduced to 0.\n     */\n    _getPositionCount(hash) {\n      return this._positionCount.get(hash) ?? 0;\n    }\n    _incPositionCount() {\n      this._positionCount.set(this._hash, (this._positionCount.get(this._hash) ?? 0) + 1);\n    }\n    _decPositionCount(hash) {\n      const currentCount = this._positionCount.get(hash) ?? 0;\n      if (currentCount === 1) {\n        this._positionCount.delete(hash);\n      } else {\n        this._positionCount.set(hash, currentCount - 1);\n      }\n    }\n    _pruneComments() {\n      const reversedHistory = [];\n      const currentComments = {};\n      const copyComment = (fen) => {\n        if (fen in this._comments) {\n          currentComments[fen] = this._comments[fen];\n        }\n      };\n      while (this._history.length > 0) {\n        reversedHistory.push(this._undoMove());\n      }\n      copyComment(this.fen());\n      while (true) {\n        const move = reversedHistory.pop();\n        if (!move) {\n          break;\n        }\n        this._makeMove(move);\n        copyComment(this.fen());\n      }\n      this._comments = currentComments;\n    }\n    getComment() {\n      return this._comments[this.fen()];\n    }\n    setComment(comment) {\n      this._comments[this.fen()] = comment.replace("{", "[").replace("}", "]");\n    }\n    /**\n     * @deprecated Renamed to `removeComment` for consistency\n     */\n    deleteComment() {\n      return this.removeComment();\n    }\n    removeComment() {\n      const comment = this._comments[this.fen()];\n      delete this._comments[this.fen()];\n      return comment;\n    }\n    getComments() {\n      this._pruneComments();\n      return Object.keys(this._comments).map((fen) => {\n        return { fen, comment: this._comments[fen] };\n      });\n    }\n    /**\n     * @deprecated Renamed to `removeComments` for consistency\n     */\n    deleteComments() {\n      return this.removeComments();\n    }\n    removeComments() {\n      this._pruneComments();\n      return Object.keys(this._comments).map((fen) => {\n        const comment = this._comments[fen];\n        delete this._comments[fen];\n        return { fen, comment };\n      });\n    }\n    setCastlingRights(color, rights) {\n      for (const side of [KING, QUEEN]) {\n        if (rights[side] !== void 0) {\n          if (rights[side]) {\n            this._castling[color] |= SIDES[side];\n          } else {\n            this._castling[color] &= ~SIDES[side];\n          }\n        }\n      }\n      this._updateCastlingRights();\n      const result = this.getCastlingRights(color);\n      return (rights[KING] === void 0 || rights[KING] === result[KING]) && (rights[QUEEN] === void 0 || rights[QUEEN] === result[QUEEN]);\n    }\n    getCastlingRights(color) {\n      return {\n        [KING]: (this._castling[color] & SIDES[KING]) !== 0,\n        [QUEEN]: (this._castling[color] & SIDES[QUEEN]) !== 0\n      };\n    }\n    moveNumber() {\n      return this._moveNumber;\n    }\n  };\n\n  // src/evaluation.ts\n  var PIECE_VALUE = { p: 100, n: 320, b: 330, r: 500, q: 900, k: 0 };\n  var PAWN_PST = [\n    [0, 0, 0, 0, 0, 0, 0, 0],\n    [50, 50, 50, 50, 50, 50, 50, 50],\n    [10, 10, 20, 30, 30, 20, 10, 10],\n    [5, 5, 10, 25, 25, 10, 5, 5],\n    [0, 0, 0, 20, 20, 0, 0, 0],\n    [5, -5, -10, 0, 0, -10, -5, 5],\n    [5, 10, 10, -20, -20, 10, 10, 5],\n    [0, 0, 0, 0, 0, 0, 0, 0]\n  ];\n  var KNIGHT_PST = [\n    [-50, -40, -30, -30, -30, -30, -40, -50],\n    [-40, -20, 0, 0, 0, 0, -20, -40],\n    [-30, 0, 10, 15, 15, 10, 0, -30],\n    [-30, 5, 15, 20, 20, 15, 5, -30],\n    [-30, 0, 15, 20, 20, 15, 0, -30],\n    [-30, 5, 10, 15, 15, 10, 5, -30],\n    [-40, -20, 0, 5, 5, 0, -20, -40],\n    [-50, -40, -30, -30, -30, -30, -40, -50]\n  ];\n  var BISHOP_PST = [\n    [-20, -10, -10, -10, -10, -10, -10, -20],\n    [-10, 0, 0, 0, 0, 0, 0, -10],\n    [-10, 0, 5, 10, 10, 5, 0, -10],\n    [-10, 5, 5, 10, 10, 5, 5, -10],\n    [-10, 0, 10, 10, 10, 10, 0, -10],\n    [-10, 10, 10, 10, 10, 10, 10, -10],\n    [-10, 5, 0, 0, 0, 0, 5, -10],\n    [-20, -10, -10, -10, -10, -10, -10, -20]\n  ];\n  var ROOK_PST = [\n    [0, 0, 0, 0, 0, 0, 0, 0],\n    [5, 10, 10, 10, 10, 10, 10, 5],\n    [-5, 0, 0, 0, 0, 0, 0, -5],\n    [-5, 0, 0, 0, 0, 0, 0, -5],\n    [-5, 0, 0, 0, 0, 0, 0, -5],\n    [-5, 0, 0, 0, 0, 0, 0, -5],\n    [-5, 0, 0, 0, 0, 0, 0, -5],\n    [0, 0, 0, 5, 5, 0, 0, 0]\n  ];\n  var QUEEN_PST = [\n    [-20, -10, -10, -5, -5, -10, -10, -20],\n    [-10, 0, 0, 0, 0, 0, 0, -10],\n    [-10, 0, 5, 5, 5, 5, 0, -10],\n    [-5, 0, 5, 5, 5, 5, 0, -5],\n    [0, 0, 5, 5, 5, 5, 0, -5],\n    [-10, 5, 5, 5, 5, 5, 0, -10],\n    [-10, 0, 5, 0, 0, 0, 0, -10],\n    [-20, -10, -10, -5, -5, -10, -10, -20]\n  ];\n  var KING_PST = [\n    [-30, -40, -40, -50, -50, -40, -40, -30],\n    [-30, -40, -40, -50, -50, -40, -40, -30],\n    [-30, -40, -40, -50, -50, -40, -40, -30],\n    [-30, -40, -40, -50, -50, -40, -40, -30],\n    [-20, -30, -30, -40, -40, -30, -30, -20],\n    [-10, -20, -20, -20, -20, -20, -20, -10],\n    [20, 20, 0, 0, 0, 0, 20, 20],\n    [20, 30, 10, 0, 0, 10, 30, 20]\n  ];\n  var PST = {\n    p: PAWN_PST,\n    n: KNIGHT_PST,\n    b: BISHOP_PST,\n    r: ROOK_PST,\n    q: QUEEN_PST,\n    k: KING_PST\n  };\n  var BISHOP_PAIR_BONUS = 30;\n  var TEMPO_BONUS = 10;\n  function evaluate(board) {\n    let score = 0;\n    let whiteBishops = 0;\n    let blackBishops = 0;\n    for (let i = 0; i <= 119; i++) {\n      if (i & 136) {\n        i += 7;\n        continue;\n      }\n      const cell = board._board[i];\n      if (!cell)\n        continue;\n      const isWhite = cell.color === "w";\n      const rank2 = i >> 4;\n      const posRank = isWhite ? rank2 : 7 - rank2;\n      const value = PIECE_VALUE[cell.type] + PST[cell.type][posRank][i & 15];\n      score += isWhite ? value : -value;\n      if (cell.type === "b") {\n        if (isWhite)\n          whiteBishops++;\n        else\n          blackBishops++;\n      }\n    }\n    if (whiteBishops >= 2)\n      score += BISHOP_PAIR_BONUS;\n    if (blackBishops >= 2)\n      score -= BISHOP_PAIR_BONUS;\n    return score + (board.turn() === "w" ? TEMPO_BONUS : -TEMPO_BONUS);\n  }\n\n  // src/opening-book.ts\n  var BOOK_LINES = [\n    // --- 1.e4 e5 ---\n    "e4 e5 Nf3 Nc6 Bb5 a6 Ba4 Nf6",\n    // Ruy Lopez, Morphy Defence\n    "e4 e5 Nf3 Nc6 Bb5 a6 Bxc6 dxc6",\n    // Ruy Lopez, Exchange\n    "e4 e5 Nf3 Nc6 Bb5 Nf6",\n    // Ruy Lopez, Berlin\n    "e4 e5 Nf3 Nc6 Bc4 Bc5 c3 Nf6",\n    // Italian Game\n    "e4 e5 Nf3 Nc6 Bc4 Nf6 Ng5 d5",\n    // Two Knights\n    "e4 e5 Nf3 Nc6 d4 exd4 Nxd4 Nf6",\n    // Scotch\n    "e4 e5 Nf3 Nf6 Nxe5 d6 Nf3 Nxe4",\n    // Petroff\n    "e4 e5 Nf3 d6 d4 Nf6 Nc3 Nbd7",\n    // Philidor\n    "e4 e5 Nf3 Nc6 Nc3 Nf6 Bb5 Bb4",\n    // Four Knights\n    "e4 e5 Nc3 Nf6 f4 d5",\n    // Vienna\n    "e4 e5 Bc4 Nf6 d3 Bc5",\n    // Bishop\'s Opening\n    "e4 e5 f4 exf4 Nf3 g5",\n    // King\'s Gambit Accepted\n    // --- 1.e4 c5 ---\n    "e4 c5 Nf3 d6 d4 cxd4 Nxd4 Nf6 Nc3 a6",\n    // Najdorf\n    "e4 c5 Nf3 d6 d4 cxd4 Nxd4 Nf6 Nc3 g6",\n    // Dragon\n    "e4 c5 Nf3 Nc6 d4 cxd4 Nxd4 Nf6 Nc3 e5",\n    // Sveshnikov\n    "e4 c5 Nf3 e6 d4 cxd4 Nxd4 Nf6 Nc3 d6",\n    // Scheveningen\n    "e4 c5 Nc3 Nc6 g3 g6 Bg2 Bg7",\n    // Closed Sicilian\n    "e4 c5 c3 d5 exd5 Qxd5 d4 Nf6",\n    // Alapin\n    "e4 c5 Nf3 d6 Bb5+ Bd7",\n    // Moscow Variation\n    // --- 1.e4 e6 ---\n    "e4 e6 d4 d5 Nc3 Bb4 e5 c5",\n    // French, Winawer\n    "e4 e6 d4 d5 Nc3 Nf6 Bg5 Be7",\n    // French, Classical\n    "e4 e6 d4 d5 Nd2 c5 exd5 exd5",\n    // French, Tarrasch\n    "e4 e6 d4 d5 e5 c5 c3 Nc6",\n    // French, Advance\n    "e4 e6 d4 d5 exd5 exd5 Nf3 Nf6",\n    // French, Exchange\n    // --- 1.e4 c6 ---\n    "e4 c6 d4 d5 Nc3 dxe4 Nxe4 Bf5",\n    // Caro-Kann, Classical\n    "e4 c6 d4 d5 e5 Bf5 Nf3 e6",\n    // Caro-Kann, Advance\n    "e4 c6 d4 d5 exd5 cxd5 c4 Nf6",\n    // Panov Attack\n    "e4 c6 Nf3 d5 Nc3 Bg4",\n    // Caro-Kann, Two Knights\n    // --- other replies to 1.e4 ---\n    "e4 d6 d4 Nf6 Nc3 g6 Nf3 Bg7",\n    // Pirc\n    "e4 g6 d4 Bg7 Nc3 d6 Nf3 Nf6",\n    // Modern\n    "e4 Nf6 e5 Nd5 d4 d6 Nf3 g6",\n    // Alekhine\n    "e4 d5 exd5 Qxd5 Nc3 Qa5 d4 Nf6",\n    // Scandinavian\n    // --- 1.d4 d5 ---\n    "d4 d5 c4 e6 Nc3 Nf6 Bg5 Be7",\n    // Queen\'s Gambit Declined\n    "d4 d5 c4 dxc4 Nf3 Nf6 e3 e6",\n    // Queen\'s Gambit Accepted\n    "d4 d5 c4 c6 Nf3 Nf6 Nc3 dxc4",\n    // Slav\n    "d4 d5 c4 c6 Nf3 Nf6 Nc3 e6",\n    // Semi-Slav\n    "d4 d5 c4 e6 Nc3 c5",\n    // Tarrasch Defence\n    "d4 d5 c4 e6 Nf3 Nf6 g3 Be7",\n    // Catalan\n    "d4 d5 Nf3 Nf6 Bf4 e6",\n    // London System\n    // --- 1.d4 Nf6 ---\n    "d4 Nf6 c4 e6 Nc3 Bb4 e3 O-O",\n    // Nimzo-Indian\n    "d4 Nf6 c4 e6 Nf3 b6 g3 Ba6",\n    // Queen\'s Indian\n    "d4 Nf6 c4 g6 Nc3 Bg7 e4 d6",\n    // King\'s Indian\n    "d4 Nf6 c4 g6 Nc3 d5 cxd5 Nxd5",\n    // Gr\xFCnfeld\n    "d4 Nf6 c4 c5 d5 b5",\n    // Benko Gambit\n    "d4 Nf6 Nf3 g6 Bf4 Bg7",\n    // London vs the King\'s Indian\n    // --- Dutch ---\n    "d4 f5 g3 Nf6 Bg2 g6",\n    // Leningrad Dutch\n    "d4 e6 c4 f5 Nc3 Nf6",\n    // Dutch by transposition\n    // --- flank openings ---\n    "c4 e5 Nc3 Nf6 Nf3 Nc6 g3 d5",\n    // English, Four Knights\n    "c4 c5 Nf3 Nf6 Nc3 Nc6 g3 g6",\n    // Symmetrical English\n    "c4 Nf6 Nc3 e6 e4 c5",\n    // English, Mikenas\n    "c4 e6 Nc3 d5 d4 Nf6",\n    // English into the QGD\n    "Nf3 d5 d4 Nf6 c4 e6",\n    // R\xE9ti into the QGD\n    "Nf3 Nf6 c4 g6 Nc3 d5",\n    // R\xE9ti, King\'s Indian setup\n    "Nf3 c5 c4 Nc6 Nc3 g6"\n    // R\xE9ti into the English\n  ];\n  var MAX_BOOK_PLY = 10;\n  var book = null;\n  var brokenLines = [];\n  function positionKey(fen) {\n    return fen.split(" ", 4).join(" ");\n  }\n  function buildBook() {\n    const table = /* @__PURE__ */ new Map();\n    for (const line of BOOK_LINES) {\n      const chess = new Chess();\n      for (const san of line.split(" ")) {\n        const key = positionKey(chess.fen());\n        let move;\n        try {\n          move = chess.move(san);\n        } catch {\n          brokenLines.push(`${line} (at ${san})`);\n          break;\n        }\n        const entry = table.get(key);\n        if (!entry)\n          table.set(key, [{ from: move.from, to: move.to }]);\n        else if (!entry.some((m) => m.from === move.from && m.to === move.to)) {\n          entry.push({ from: move.from, to: move.to });\n        }\n      }\n    }\n    return table;\n  }\n  function openingBook() {\n    return book ?? (book = buildBook());\n  }\n  function bookMove(chess, rng = Math.random) {\n    const ply = (chess.moveNumber() - 1) * 2 + (chess.turn() === "w" ? 0 : 1);\n    if (ply >= MAX_BOOK_PLY)\n      return null;\n    const moves = openingBook().get(positionKey(chess.fen()));\n    if (!moves || moves.length === 0)\n      return null;\n    return moves[Math.floor(rng() * moves.length)];\n  }\n\n  // src/engine-board.ts\n  var REQUIRED_INTERNALS = ["_moves", "_makeMove", "_undoMove"];\n  function hasInternalApi(chess) {\n    const candidate = chess;\n    if (!REQUIRED_INTERNALS.every((name) => typeof candidate[name] === "function"))\n      return false;\n    return Array.isArray(candidate._board) && typeof candidate._hash === "bigint" && typeof candidate._halfMoves === "number" && candidate._positionCount instanceof Map;\n  }\n  function asEngineBoard(chess) {\n    if (!hasInternalApi(chess)) {\n      throw new Error("chess.js internal search API is missing \\u2014 see src/engine-board.ts");\n    }\n    return chess;\n  }\n  var FILE_LETTERS = "abcdefgh";\n  var RANK_DIGITS = "87654321";\n  function toAlgebraic(square) {\n    return `${FILE_LETTERS[square & 15]}${RANK_DIGITS[square >> 4]}`;\n  }\n\n  // src/search.ts\n  var MATE_SCORE = 1e5;\n  var PIECE_VALUE2 = { p: 100, n: 320, b: 330, r: 500, q: 900, k: 2e4 };\n  var MAX_QUIESCENCE_PLY = 40;\n  var DEADLINE_POLL_MASK = 511;\n  var SearchTimeout = class extends Error {\n  };\n  var TT_BITS = 18;\n  var TT_SIZE = 1 << TT_BITS;\n  var TT_MASK = BigInt(TT_SIZE - 1);\n  var TT_EXACT = 0;\n  var TT_LOWER = 1;\n  var TT_UPPER = 2;\n  var ttKeys = new BigUint64Array(TT_SIZE);\n  var ttScores = new Int32Array(TT_SIZE);\n  var ttDepths = new Int8Array(TT_SIZE);\n  var ttFlags = new Uint8Array(TT_SIZE);\n  var ttFrom = new Uint8Array(TT_SIZE);\n  var ttTo = new Uint8Array(TT_SIZE);\n  var ttGenerations = new Uint16Array(TT_SIZE);\n  var ttGeneration = 0;\n  function ttIndex(hash) {\n    return Number(hash & TT_MASK);\n  }\n  function scoreToTT(score, ply) {\n    if (score > MATE_SCORE - 1e3)\n      return score + ply;\n    if (score < -MATE_SCORE + 1e3)\n      return score - ply;\n    return score;\n  }\n  function scoreFromTT(score, ply) {\n    if (score > MATE_SCORE - 1e3)\n      return score - ply;\n    if (score < -MATE_SCORE + 1e3)\n      return score + ply;\n    return score;\n  }\n  function moveScore(move) {\n    let score = 0;\n    if (move.captured)\n      score += PIECE_VALUE2[move.captured] * 10 - PIECE_VALUE2[move.piece];\n    if (move.promotion)\n      score += PIECE_VALUE2[move.promotion];\n    return score;\n  }\n  function orderMoves(moves, hashFrom = -1, hashTo = -1) {\n    return moves.sort((a, b) => {\n      const aHash = a.from === hashFrom && a.to === hashTo ? 1e6 : 0;\n      const bHash = b.from === hashFrom && b.to === hashTo ? 1e6 : 0;\n      return bHash + moveScore(b) - (aHash + moveScore(a));\n    });\n  }\n  function checkDeadline(ctx) {\n    if ((++ctx.nodes & DEADLINE_POLL_MASK) === 0 && Date.now() > ctx.deadline)\n      throw new SearchTimeout();\n  }\n  function isDrawByRule(ctx) {\n    if (ctx.board._halfMoves >= 100)\n      return true;\n    return (ctx.repetitions.get(ctx.board._hash) ?? 0) >= 2;\n  }\n  function makeMove(ctx, move) {\n    ctx.board._makeMove(move);\n    const hash = ctx.board._hash;\n    ctx.repetitions.set(hash, (ctx.repetitions.get(hash) ?? 0) + 1);\n  }\n  function unmakeMove(ctx) {\n    const hash = ctx.board._hash;\n    const count = ctx.repetitions.get(hash) ?? 0;\n    if (count <= 1)\n      ctx.repetitions.delete(hash);\n    else\n      ctx.repetitions.set(hash, count - 1);\n    ctx.board._undoMove();\n  }\n  function quiescence(ctx, alpha, beta, color, ply) {\n    checkDeadline(ctx);\n    if (isDrawByRule(ctx))\n      return 0;\n    const inCheck = ctx.board.isCheck();\n    const moves = ctx.board._moves({ legal: true });\n    if (moves.length === 0)\n      return inCheck ? -MATE_SCORE + ply : 0;\n    if (ply >= MAX_QUIESCENCE_PLY)\n      return color * evaluate(ctx.board);\n    let best;\n    let candidates;\n    if (inCheck) {\n      best = -Infinity;\n      candidates = orderMoves(moves);\n    } else {\n      best = color * evaluate(ctx.board);\n      if (best >= beta)\n        return best;\n      if (best > alpha)\n        alpha = best;\n      candidates = orderMoves(moves.filter((m) => m.captured || m.promotion));\n    }\n    for (const move of candidates) {\n      makeMove(ctx, move);\n      let score;\n      try {\n        score = -quiescence(ctx, -beta, -alpha, -color, ply + 1);\n      } finally {\n        unmakeMove(ctx);\n      }\n      if (score > best)\n        best = score;\n      if (score > alpha)\n        alpha = score;\n      if (alpha >= beta)\n        break;\n    }\n    return best;\n  }\n  function negamax(ctx, depth, alpha, beta, color, ply) {\n    checkDeadline(ctx);\n    if (isDrawByRule(ctx))\n      return 0;\n    const hash = ctx.board._hash;\n    const slot = ttIndex(hash);\n    const alphaOrig = alpha;\n    let hashFrom = -1;\n    let hashTo = -1;\n    if (ttKeys[slot] === hash && ttGenerations[slot] === ttGeneration) {\n      hashFrom = ttFrom[slot];\n      hashTo = ttTo[slot];\n      if (ttDepths[slot] >= depth) {\n        const stored = scoreFromTT(ttScores[slot], ply);\n        const flag = ttFlags[slot];\n        if (flag === TT_EXACT)\n          return stored;\n        if (flag === TT_LOWER && stored > alpha)\n          alpha = stored;\n        else if (flag === TT_UPPER && stored < beta)\n          beta = stored;\n        if (alpha >= beta)\n          return stored;\n      }\n    }\n    if (depth === 0 && ctx.quiescence)\n      return quiescence(ctx, alpha, beta, color, ply);\n    const moves = orderMoves(ctx.board._moves({ legal: true }), hashFrom, hashTo);\n    if (moves.length === 0) {\n      if (ctx.board.isCheck())\n        return -MATE_SCORE + ply;\n      return 0;\n    }\n    if (depth === 0)\n      return color * evaluate(ctx.board);\n    let best = -Infinity;\n    let bestMove = moves[0];\n    for (const move of moves) {\n      makeMove(ctx, move);\n      let score;\n      try {\n        score = -negamax(ctx, depth - 1, -beta, -alpha, -color, ply + 1);\n      } finally {\n        unmakeMove(ctx);\n      }\n      if (score > best) {\n        best = score;\n        bestMove = move;\n      }\n      if (score > alpha)\n        alpha = score;\n      if (alpha >= beta)\n        break;\n    }\n    if (ttGenerations[slot] !== ttGeneration || ttDepths[slot] <= depth) {\n      ttKeys[slot] = hash;\n      ttScores[slot] = scoreToTT(best, ply);\n      ttDepths[slot] = depth;\n      ttFlags[slot] = best <= alphaOrig ? TT_UPPER : best >= beta ? TT_LOWER : TT_EXACT;\n      ttFrom[slot] = bestMove.from;\n      ttTo[slot] = bestMove.to;\n      ttGenerations[slot] = ttGeneration;\n    }\n    return best;\n  }\n  var EQUAL_MOVE_MARGIN = 10;\n  var EQUAL_MOVE_MAX_ADVANTAGE = 200;\n  function pickMove(ranked, profile, rng) {\n    if (profile.blunderChance > 0 && rng() < profile.blunderChance) {\n      const poolSize = Math.max(1, Math.round(ranked.length * profile.blunderPoolFraction));\n      const pool2 = ranked.slice(ranked.length - poolSize);\n      return pool2[Math.floor(rng() * pool2.length)];\n    }\n    if (profile.topN === 1) {\n      if (Math.abs(ranked[0].score) > EQUAL_MOVE_MAX_ADVANTAGE)\n        return ranked[0];\n      const cutoff = ranked[0].score - EQUAL_MOVE_MARGIN;\n      const tied = ranked.filter((entry) => entry.score >= cutoff);\n      return tied[Math.floor(rng() * tied.length)];\n    }\n    const topN = Math.min(profile.topN, ranked.length);\n    const pool = ranked.slice(0, topN);\n    return pool[Math.floor(rng() * pool.length)];\n  }\n  function describeMove(move) {\n    const out = { from: toAlgebraic(move.from), to: toAlgebraic(move.to) };\n    if (move.promotion)\n      out.promotion = move.promotion;\n    return out;\n  }\n  function findMove(chess, profile, rng = Math.random) {\n    if (profile.openingBook) {\n      const opening = bookMove(chess, rng);\n      if (opening)\n        return { move: opening, evalCp: 0, depthReached: 0, fromBook: true };\n    }\n    const { ranked, depthReached, color } = searchRoot(chess, profile);\n    const chosen = pickMove(ranked, profile, rng);\n    return { move: describeMove(chosen.move), evalCp: color * chosen.score, depthReached };\n  }\n  function searchRoot(chess, profile) {\n    const board = asEngineBoard(chess);\n    const rootMoves = orderMoves(board._moves({ legal: true }));\n    if (rootMoves.length === 0)\n      throw new Error("no legal moves in this position");\n    ttGeneration = ttGeneration + 1 & 65535;\n    const repetitions = new Map(board._positionCount);\n    repetitions.set(board._hash, Math.max(1, repetitions.get(board._hash) ?? 0));\n    const ctx = {\n      board,\n      deadline: Date.now() + profile.timeBudgetMs,\n      nodes: 0,\n      quiescence: profile.quiescence,\n      repetitions\n    };\n    const color = board.turn() === "w" ? 1 : -1;\n    const needsExactRanking = profile.topN > 1 || profile.blunderChance > 0;\n    let ranked = rootMoves.map((move) => ({ move, score: 0 }));\n    let depthReached = 0;\n    for (let depth = 1; depth <= profile.depth; depth++) {\n      const scored = [];\n      try {\n        const ordered = [...ranked].sort((a, b) => b.score - a.score).map((sm) => sm.move);\n        let rootAlpha = -Infinity;\n        for (const move of ordered) {\n          makeMove(ctx, move);\n          let score;\n          try {\n            const childBeta = needsExactRanking ? Infinity : -rootAlpha;\n            score = -negamax(ctx, depth - 1, -Infinity, childBeta, -color, 1);\n          } finally {\n            unmakeMove(ctx);\n          }\n          scored.push({ move, score });\n          if (!needsExactRanking && score > rootAlpha)\n            rootAlpha = score;\n        }\n      } catch (e) {\n        if (e instanceof SearchTimeout)\n          break;\n        throw e;\n      }\n      ranked = scored;\n      depthReached = depth;\n    }\n    ranked.sort((a, b) => b.score - a.score);\n    return { ranked, depthReached, color };\n  }\n\n  // src/engine-worker.ts\n  function buildPosition(fen, sanHistory) {\n    if (Array.isArray(sanHistory) && sanHistory.length > 0) {\n      try {\n        const replay = new Chess();\n        for (const san of sanHistory)\n          replay.move(san);\n        if (replay.fen() === fen)\n          return replay;\n      } catch {\n      }\n    }\n    return new Chess(fen);\n  }\n  self.onmessage = (e) => {\n    const { id, fen, sanHistory, profile } = e.data;\n    try {\n      const chess = buildPosition(fen, sanHistory);\n      const { move, evalCp, depthReached, fromBook } = findMove(chess, profile);\n      const response = {\n        id,\n        ok: true,\n        from: move.from,\n        to: move.to,\n        promotion: move.promotion,\n        evalCp,\n        depthReached,\n        fromBook\n      };\n      self.postMessage(response);\n    } catch (err) {\n      const response = { id, ok: false, error: String(err) };\n      self.postMessage(response);\n    }\n  };\n})();\n/*! Bundled license information:\n\nchess.js/dist/esm/chess.js:\n  (**\n   * @license\n   * Copyright (c) 2025, Jeff Hlywa (jhlywa@gmail.com)\n   * All rights reserved.\n   *\n   * Redistribution and use in source and binary forms, with or without\n   * modification, are permitted provided that the following conditions are met:\n   *\n   * 1. Redistributions of source code must retain the above copyright notice,\n   *    this list of conditions and the following disclaimer.\n   * 2. Redistributions in binary form must reproduce the above copyright notice,\n   *    this list of conditions and the following disclaimer in the documentation\n   *    and/or other materials provided with the distribution.\n   *\n   * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"\n   * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE\n   * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE\n   * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE\n   * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR\n   * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF\n   * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS\n   * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN\n   * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)\n   * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE\n   * POSSIBILITY OF SUCH DAMAGE.\n   *)\n*/\n'], { type: "text/javascript" });
     workerUrl = URL.createObjectURL(blob);
   }
   return workerUrl;
 }
 var nextRequestId = 1;
-var HUMAN_CLOCK_MS = 10 * 60 * 1e3;
+var DEFAULT_CLOCK_MINUTES = 10;
+var UNDO_AFTER_TIMEOUT_MS = 30 * 1e3;
+var RESULT_ALREADY_COUNTED = { from: 0, to: 0, streakBefore: 0 };
+var RESULT_OUTSIDE_STATS = { level: 0, outcome: "draw" };
 var GameController = class {
   constructor() {
     this.chess = new Chess();
     this.humanColor = "w";
     this.thinking = false;
     this.resigned = false;
-    this.humanTimeMs = HUMAN_CLOCK_MS;
-    this.humanClockStartedAt = Date.now();
+    /** 0 disables the clock entirely. */
+    this.clockMs = DEFAULT_CLOCK_MINUTES * 60 * 1e3;
+    /** Fischer increment: added to the human clock after each of their moves. */
+    this.incrementMs = 0;
+    this.humanTimeMs = DEFAULT_CLOCK_MINUTES * 60 * 1e3;
+    this.humanClockStartedAt = null;
     this.timedOut = false;
+    /** Set when the search backend could not be started at all. */
+    this.engineError = null;
+    /** The engine's own score for its last move, in centipawns from white's
+     *  point of view, with the depth it actually reached. */
+    this.lastEval = null;
+    /** The move the board highlights. Kept here because the only way to ask
+     *  chess.js for it is to rebuild the whole verbose history, which costs 6 ms
+     *  in a 120-ply game — paid on every repaint, including picking up a piece. */
+    this.lastMove = null;
+    /** The bot's last move came out of the opening book, so `lastEval` is empty
+     *  by design rather than because the search failed to report one. */
+    this.lastMoveFromBook = false;
+    /** Set by adaptive difficulty once this game's result has been counted. */
+    this.resultApplied = null;
+    /** Set once this game has gone into the per-level tally. */
+    this.statsRecorded = null;
     this.listeners = /* @__PURE__ */ new Set();
     this.activeWorker = null;
     this.cancelActiveRequest = null;
     this.searchGeneration = 0;
+  }
+  get clockEnabled() {
+    return this.clockMs > 0;
   }
   onChange(fn) {
     this.listeners.add(fn);
@@ -3603,44 +3827,72 @@ var GameController = class {
     cancel?.();
     this.thinking = false;
   }
-  newGame(humanColor) {
+  newGame(humanColor, clockMs = this.clockMs, incrementMs = this.incrementMs) {
     this.abortBotSearch();
     this.chess = new Chess();
     this.humanColor = humanColor;
     this.resigned = false;
-    this.humanTimeMs = HUMAN_CLOCK_MS;
-    this.humanClockStartedAt = humanColor === "w" ? Date.now() : null;
+    this.clockMs = clockMs;
+    this.incrementMs = incrementMs;
+    this.humanTimeMs = clockMs;
+    this.humanClockStartedAt = null;
     this.timedOut = false;
+    this.engineError = null;
+    this.lastEval = null;
+    this.lastMove = null;
+    this.lastMoveFromBook = false;
+    this.resultApplied = null;
+    this.statsRecorded = null;
     this.notify();
   }
+  /** Rebuilds a saved game. Returns false if the save was unusable and a fresh
+   *  game had to be started instead — a hand-edited or truncated data.json used
+   *  to throw out of here and take the whole plugin's onload down with it. */
   restore(saved) {
     this.abortBotSearch();
     let restored = null;
+    let replayedLast = null;
     if (Array.isArray(saved.sanHistory)) {
       try {
         const replay = new Chess();
+        let last = null;
         for (const san of saved.sanHistory)
-          replay.move(san);
-        if (replay.fen() === saved.fen)
+          last = replay.move(san);
+        if (replay.fen() === saved.fen) {
           restored = replay;
+          replayedLast = last;
+        }
       } catch {
       }
     }
-    this.chess = restored ?? new Chess(saved.fen);
-    this.humanColor = saved.playerColor;
-    this.resigned = saved.resigned ?? false;
-    this.humanTimeMs = saved.humanTimeMs ?? HUMAN_CLOCK_MS;
-    this.timedOut = saved.timedOut ?? false;
-    if (!this.resigned && !this.timedOut && !this.chess.isGameOver() && this.chess.turn() === this.humanColor) {
-      const anchor = saved.humanClockStartedAt ?? Date.now();
-      this.humanTimeMs = Math.max(0, this.humanTimeMs - Math.max(0, Date.now() - anchor));
-      this.humanClockStartedAt = Date.now();
-      if (this.humanTimeMs === 0)
-        this.timedOut = true;
-    } else {
-      this.humanClockStartedAt = null;
+    if (!restored) {
+      try {
+        restored = new Chess(saved.fen);
+      } catch {
+        this.newGame(
+          saved.playerColor === "b" ? "b" : "w",
+          saved.clockMs ?? this.clockMs,
+          saved.incrementMs ?? this.incrementMs
+        );
+        return false;
+      }
     }
+    this.chess = restored;
+    this.lastMove = replayedLast;
+    this.humanColor = saved.playerColor === "b" ? "b" : "w";
+    this.resigned = saved.resigned ?? false;
+    this.timedOut = saved.timedOut ?? false;
+    this.engineError = null;
+    this.lastEval = null;
+    this.lastMoveFromBook = false;
+    this.clockMs = saved.clockMs ?? DEFAULT_CLOCK_MINUTES * 60 * 1e3;
+    this.incrementMs = saved.incrementMs ?? 0;
+    this.humanTimeMs = saved.humanTimeMs ?? this.clockMs;
+    this.humanClockStartedAt = null;
+    this.resultApplied = saved.resultApplied ?? (this.isGameOver ? RESULT_ALREADY_COUNTED : null);
+    this.statsRecorded = saved.statsRecorded ?? (this.isGameOver ? RESULT_OUTSIDE_STATS : null);
     this.notify();
+    return true;
   }
   serialize() {
     return {
@@ -3648,12 +3900,17 @@ var GameController = class {
       sanHistory: this.chess.history(),
       playerColor: this.humanColor,
       resigned: this.resigned,
+      clockMs: this.clockMs,
+      incrementMs: this.incrementMs,
       humanTimeMs: this.remainingHumanTimeMs,
-      humanClockStartedAt: this.humanClockStartedAt === null ? null : Date.now(),
-      timedOut: this.timedOut
+      timedOut: this.timedOut,
+      resultApplied: this.resultApplied,
+      statsRecorded: this.statsRecorded
     };
   }
   get remainingHumanTimeMs() {
+    if (!this.clockEnabled)
+      return Infinity;
     if (this.humanClockStartedAt === null)
       return this.humanTimeMs;
     return Math.max(0, this.humanTimeMs - (Date.now() - this.humanClockStartedAt));
@@ -3661,8 +3918,50 @@ var GameController = class {
   get isGameOver() {
     return this.resigned || this.timedOut || this.chess.isGameOver();
   }
+  /** How the game ended, from the point of view of the person playing. */
+  get outcome() {
+    if (this.resigned || this.timedOut)
+      return "loss";
+    if (this.chess.isCheckmate())
+      return this.chess.turn() === this.humanColor ? "loss" : "win";
+    if (this.chess.isGameOver())
+      return "draw";
+    return null;
+  }
+  /** Half-moves the person has played. Derived from the position rather than
+   *  the move list, so it is also right for a game restored from a bare FEN. */
+  get humanMovesPlayed() {
+    const ply = (this.chess.moveNumber() - 1) * 2 + (this.chess.turn() === "w" ? 0 : 1);
+    return this.humanColor === "w" ? Math.ceil(ply / 2) : Math.floor(ply / 2);
+  }
+  /**
+   * The clock is a budget for thinking about moves, so it does not start until
+   * the first one is made. Opening the board, picking a colour and staring at
+   * the initial position no longer costs the person anything.
+   */
+  get clockStarted() {
+    return this.humanMovesPlayed > 0;
+  }
   get isHumanTurn() {
     return !this.isGameOver && !this.thinking && this.chess.turn() === this.humanColor;
+  }
+  /** Whether there is a played move for undo to take back. If it is already the
+   *  human's turn the latest move was the bot's, so a second ply must exist or
+   *  there is no human move under it (e.g. the bot's opening move against black). */
+  get hasMoveToUndo() {
+    const historyLength = this.chess.history().length;
+    if (historyLength === 0)
+      return false;
+    return !(this.chess.turn() === this.humanColor && historyLength < 2);
+  }
+  /**
+   * Undo is also the only way back from resigning or losing on time, so it is
+   * available for those even with no move to pop — resigning on move one used
+   * to leave the board in a finished game the button silently refused to touch,
+   * while the confirmation box promised the opposite.
+   */
+  get canUndo() {
+    return this.hasMoveToUndo || this.resigned || this.timedOut;
   }
   resign() {
     if (this.isGameOver)
@@ -3672,9 +3971,6 @@ var GameController = class {
     this.resigned = true;
     this.notify();
     return true;
-  }
-  legalMovesFrom(square) {
-    return this.chess.moves({ square, verbose: true });
   }
   applyHumanMove(from, to, promotion) {
     if (!this.isHumanTurn)
@@ -3689,28 +3985,41 @@ var GameController = class {
     } catch {
       return null;
     }
+    this.lastMove = move;
     this.pauseHumanClock();
+    if (this.clockEnabled && this.incrementMs > 0)
+      this.humanTimeMs += this.incrementMs;
     this.notify();
     return move;
   }
   /** Pops the bot's reply (if it landed) and the human move under it, so undo
-   *  always hands the turn straight back to the human to try something else. */
+   *  always hands the turn straight back to the human to try something else.
+   *  With nothing to pop it still lifts a resignation or a loss on time. */
   undoHumanTurn() {
-    const historyLength = this.chess.history().length;
-    if (historyLength === 0)
+    if (!this.canUndo)
       return false;
-    if (this.chess.turn() === this.humanColor && historyLength < 2)
-      return false;
+    const takingBackMoves = this.hasMoveToUndo;
     this.abortBotSearch();
     this.pauseHumanClock();
+    if (takingBackMoves && this.clockEnabled && this.incrementMs > 0) {
+      this.humanTimeMs = Math.max(0, this.humanTimeMs - this.incrementMs);
+    }
+    if (this.timedOut)
+      this.humanTimeMs = Math.max(this.humanTimeMs, UNDO_AFTER_TIMEOUT_MS);
     this.resigned = false;
     this.timedOut = false;
-    this.chess.undo();
-    if (this.chess.turn() !== this.humanColor && this.chess.history().length > 0) {
+    this.lastEval = null;
+    this.lastMoveFromBook = false;
+    if (takingBackMoves) {
       this.chess.undo();
+      if (this.chess.turn() !== this.humanColor && this.chess.history().length > 0) {
+        this.chess.undo();
+      }
+      const history = this.chess.history({ verbose: true });
+      this.lastMove = history[history.length - 1] ?? null;
     }
     if (this.chess.turn() === this.humanColor)
-      this.humanClockStartedAt = Date.now();
+      this.resumeHumanClock();
     this.notify();
     return true;
   }
@@ -3723,8 +4032,17 @@ var GameController = class {
     const requestedFen = this.chess.fen();
     const generation = ++this.searchGeneration;
     this.thinking = true;
+    this.engineError = null;
     this.notify();
-    const worker = new Worker(ensureWorkerUrl());
+    let worker;
+    try {
+      worker = new Worker(ensureWorkerUrl());
+    } catch (e) {
+      this.thinking = false;
+      this.engineError = e instanceof Error ? e.message : String(e);
+      this.notify();
+      return null;
+    }
     this.activeWorker = worker;
     const id = nextRequestId++;
     try {
@@ -3744,7 +4062,12 @@ var GameController = class {
           settled = true;
           reject(new Error(e.message || "engine worker failed"));
         };
-        const request = { id, fen: this.chess.fen(), profile };
+        const request = {
+          id,
+          fen: this.chess.fen(),
+          sanHistory: this.chess.history(),
+          profile
+        };
         worker.postMessage(request);
       });
       if (!response || generation !== this.searchGeneration)
@@ -3756,11 +4079,18 @@ var GameController = class {
       if (this.isGameOver || this.chess.turn() === this.humanColor)
         return null;
       try {
-        return this.chess.move({ from: response.from, to: response.to, promotion: response.promotion });
+        const move = this.chess.move({ from: response.from, to: response.to, promotion: response.promotion });
+        this.lastMoveFromBook = response.fromBook === true;
+        this.lastEval = this.lastMoveFromBook ? null : { cp: response.evalCp, depth: response.depthReached };
+        this.lastMove = move;
+        return move;
       } catch {
         return null;
       }
-    } catch {
+    } catch (e) {
+      if (generation === this.searchGeneration) {
+        this.engineError = e instanceof Error ? e.message : String(e);
+      }
       return null;
     } finally {
       worker.terminate();
@@ -3769,9 +4099,8 @@ var GameController = class {
       if (generation === this.searchGeneration) {
         this.cancelActiveRequest = null;
         this.thinking = false;
-        if (!this.isGameOver && this.chess.turn() === this.humanColor && this.humanClockStartedAt === null) {
-          this.humanClockStartedAt = Date.now();
-        }
+        if (!this.isGameOver && this.chess.turn() === this.humanColor)
+          this.resumeHumanClock();
         this.notify();
       }
     }
@@ -3785,14 +4114,26 @@ var GameController = class {
     this.notify();
     return true;
   }
+  /** Starts the human clock if it is genuinely their turn to think. */
+  resumeHumanClock() {
+    if (!this.clockEnabled || this.humanClockStartedAt !== null)
+      return;
+    if (this.isGameOver || this.thinking || !this.clockStarted)
+      return;
+    if (this.chess.turn() !== this.humanColor)
+      return;
+    this.humanClockStartedAt = Date.now();
+  }
   pauseHumanClock() {
+    if (!this.clockEnabled)
+      return;
     this.humanTimeMs = this.remainingHumanTimeMs;
     this.humanClockStartedAt = null;
   }
 };
 
 // src/view.ts
-var import_obsidian2 = require("obsidian");
+var import_obsidian3 = require("obsidian");
 
 // src/rules.ts
 var FILES = ["a", "b", "c", "d", "e", "f", "g", "h"];
@@ -3802,16 +4143,6 @@ function squareAt(file2, rank2) {
 }
 function isLightSquare(file2, rank2) {
   return (file2 + rank2) % 2 === 0;
-}
-function piecesOf(chess) {
-  const out = [];
-  for (const row of chess.board()) {
-    for (const cell of row) {
-      if (cell)
-        out.push({ square: cell.square, type: cell.type, color: cell.color });
-    }
-  }
-  return out;
 }
 function legalMovesFrom(chess, square) {
   return chess.moves({ square, verbose: true });
@@ -3837,9 +4168,11 @@ function statusText(chess, playerColor, thinking, resigned) {
   return chess.isCheck() ? `${toMove} \u2014 \u0448\u0430\u0445!` : toMove;
 }
 function findKing(chess, color) {
-  for (const p of piecesOf(chess)) {
-    if (p.type === "k" && p.color === color)
-      return p.square;
+  for (const row of chess.board()) {
+    for (const cell of row) {
+      if (cell && cell.type === "k" && cell.color === color)
+        return cell.square;
+    }
   }
   return null;
 }
@@ -3861,8 +4194,8 @@ var STAUNTY_PIECES = {
 };
 
 // src/pieces.ts
-function createPieceImage(type, color) {
-  const image = document.createElement("img");
+function createPieceImage(type, color, doc) {
+  const image = doc.createElement("img");
   image.className = "chess-piece-image";
   image.src = STAUNTY_PIECES[`${color}${type}`];
   image.alt = "";
@@ -3876,6 +4209,7 @@ var ChessSounds = class {
   constructor(volume) {
     this.volume = volume;
     this.context = null;
+    this.closed = false;
   }
   playMove(move, isCheck, outcome) {
     if (outcome)
@@ -3931,15 +4265,20 @@ var ChessSounds = class {
     }
   }
   close() {
+    this.closed = true;
     if (this.context)
       void this.context.close();
     this.context = null;
   }
+  /** Once closed, stay closed: a bot move can still land after the pane is gone,
+   *  and re-creating a context there leaks one nobody will ever close. */
   getContext() {
+    if (this.closed)
+      return null;
     if (this.context)
       return this.context;
     try {
-      this.context = new AudioContext();
+      this.context = new window.AudioContext();
       return this.context;
     } catch {
       return null;
@@ -3978,7 +4317,9 @@ var ChessSounds = class {
 
 // src/view.ts
 var VIEW_TYPE_CHESS = "chess-bot-view";
-var ChessView = class extends import_obsidian2.ItemView {
+var MATE_THRESHOLD = 9e4;
+var ILLEGAL_FLASH_MS = 340;
+var ChessView = class extends import_obsidian3.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.selected = null;
@@ -3986,43 +4327,68 @@ var ChessView = class extends import_obsidian2.ItemView {
     this.flipped = false;
     this.unsubscribe = null;
     this.drag = null;
-    this.suppressClickUntil = 0;
+    this.pressSquare = null;
     this.clockTimer = null;
-    this.handleDragStart = (event) => {
+    this.boardResize = null;
+    /** Toolbar buttons mirror settings that the settings tab — and adaptive
+     *  difficulty — can change behind the board's back, so their labels are
+     *  refreshed from the settings rather than only when they are clicked.
+     *  The same function greys out the buttons the position has nothing for. */
+    this.syncToolbar = () => {
+    };
+    /**
+     * Pointer events rather than mouse events: they are what a touchscreen
+     * actually emits, so dragging a piece works on mobile instead of only
+     * producing a synthesised click after the fact.
+     */
+    this.handlePointerDown = (event) => {
       if (event.button === 2) {
         event.preventDefault();
-        this.finishDrag();
-        this.selected = null;
-        this.legalTargets.clear();
-        this.render();
+        this.cancelDrag();
         return;
       }
-      if (event.button !== 0 || !this.controller.isHumanTurn)
+      if (event.button !== 0)
         return;
       const cell = event.target.closest(".chess-bot-square");
       const square = cell?.dataset.square;
       if (!cell || !square || !this.boardEl.contains(cell))
         return;
+      if (!this.controller.isHumanTurn)
+        return;
+      event.preventDefault();
+      this.pressSquare = square;
+      this.doc.addEventListener("pointerup", this.handlePointerUp);
+      this.doc.addEventListener("pointercancel", this.handlePointerCancel);
       const piece = this.controller.chess.get(square);
       if (!piece || piece.color !== this.controller.humanColor)
         return;
-      event.preventDefault();
       this.selected = square;
       this.legalTargets = new Set(legalMovesFrom(this.controller.chess, square).map((m) => m.to));
       this.drag = {
         from: square,
+        pointerId: event.pointerId,
         startX: event.clientX,
         startY: event.clientY,
         moved: false,
         preview: null
       };
       this.render();
-      document.addEventListener("mousemove", this.handleDragMove);
-      document.addEventListener("mouseup", this.handleDragEnd);
+      this.doc.addEventListener("pointermove", this.handlePointerMove);
+      this.doc.addEventListener("pointerdown", this.handleDragAbort, true);
+      this.doc.addEventListener("contextmenu", this.handleDragAbort, true);
     };
-    this.handleDragMove = (event) => {
+    /** Puts a dragged piece back and clears the move hints, without moving.
+     *  Checked by event type rather than `instanceof PointerEvent`: in a popped
+     *  out window that class comes from the other window and never matches. */
+    this.handleDragAbort = (event) => {
+      if (event.type === "pointerdown" && event.button !== 2)
+        return;
+      event.preventDefault();
+      this.cancelDrag();
+    };
+    this.handlePointerMove = (event) => {
       const drag = this.drag;
-      if (!drag)
+      if (!drag || event.pointerId !== drag.pointerId)
         return;
       if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 4)
         return;
@@ -4032,23 +4398,32 @@ var ChessView = class extends import_obsidian2.ItemView {
         this.boardEl.addClass("dragging");
         this.boardEl.querySelector(`[data-square="${drag.from}"]`)?.addClass("drag-source");
       }
-      if (drag.preview) {
-        drag.preview.style.left = `${event.clientX}px`;
-        drag.preview.style.top = `${event.clientY}px`;
-      }
+      drag.preview?.setCssStyles({ left: `${event.clientX}px`, top: `${event.clientY}px` });
     };
-    this.handleDragEnd = (event) => {
+    this.handlePointerUp = (event) => {
       const drag = this.drag;
-      if (!drag)
+      if (drag && event.pointerId !== drag.pointerId)
         return;
-      const target = this.squareUnderPointer(event.clientX, event.clientY);
-      const moved = drag.moved;
+      const pressed = this.pressSquare;
+      const dragged = drag?.moved === true;
+      const target = dragged ? this.squareUnderPointer(event.clientX, event.clientY) : pressed;
       this.finishDrag();
-      if (!moved)
+      if (dragged) {
+        if (target && this.legalTargets.has(target))
+          void this.handleSquareClick(target);
+        else {
+          this.render();
+          if (target && target !== drag?.from)
+            this.flashIllegal(target);
+        }
         return;
-      this.suppressClickUntil = performance.now() + 250;
-      if (target && this.legalTargets.has(target))
+      }
+      if (target)
         void this.handleSquareClick(target);
+    };
+    this.handlePointerCancel = () => {
+      this.finishDrag();
+      this.render();
     };
     this.plugin = plugin;
     this.controller = plugin.controller;
@@ -4062,6 +4437,14 @@ var ChessView = class extends import_obsidian2.ItemView {
   getDisplayText() {
     return "\u0428\u0430\u0445\u043C\u0430\u0442\u044B";
   }
+  /** The view's own document/window, so a popped-out pane keeps working:
+   *  a bare `document` there points at the main window, not this one. */
+  get doc() {
+    return this.contentEl.doc;
+  }
+  get win() {
+    return this.contentEl.win;
+  }
   getIcon() {
     return "crown";
   }
@@ -4071,11 +4454,9 @@ var ChessView = class extends import_obsidian2.ItemView {
     root.addClass("chess-bot-view");
     const toolbar = root.createDiv({ cls: "chess-bot-toolbar" });
     const iconButton = (icon, label) => {
-      const button = toolbar.createEl("button", {
-        cls: "chess-bot-icon-button",
-        attr: { "aria-label": label, title: label }
-      });
-      (0, import_obsidian2.setIcon)(button, icon);
+      const button = toolbar.createEl("button", { cls: "chess-bot-icon-button" });
+      (0, import_obsidian3.setIcon)(button, icon);
+      (0, import_obsidian3.setTooltip)(button, label);
       return button;
     };
     const newGameBtn = iconButton("plus", "\u041D\u043E\u0432\u0430\u044F \u0438\u0433\u0440\u0430");
@@ -4083,6 +4464,8 @@ var ChessView = class extends import_obsidian2.ItemView {
     const undoBtn = iconButton("undo-2", "\u041E\u0442\u043C\u0435\u043D\u0438\u0442\u044C \u0445\u043E\u0434");
     undoBtn.addEventListener("click", () => {
       if (this.controller.undoHumanTurn()) {
+        this.selected = null;
+        this.legalTargets.clear();
         this.sounds.play("undo");
         void this.plugin.persistGame();
       }
@@ -4092,28 +4475,21 @@ var ChessView = class extends import_obsidian2.ItemView {
       this.flipped = !this.flipped;
       this.render();
     });
-    const soundBtn = iconButton(
-      this.plugin.settings.soundEnabled ? "volume-2" : "volume-x",
-      this.plugin.settings.soundEnabled ? "\u0412\u044B\u043A\u043B\u044E\u0447\u0438\u0442\u044C \u0437\u0432\u0443\u043A" : "\u0412\u043A\u043B\u044E\u0447\u0438\u0442\u044C \u0437\u0432\u0443\u043A"
-    );
+    const soundBtn = iconButton("volume-2", "\u0412\u044B\u043A\u043B\u044E\u0447\u0438\u0442\u044C \u0437\u0432\u0443\u043A");
+    const updateSoundLabel = () => {
+      const enabled = this.plugin.settings.soundEnabled;
+      (0, import_obsidian3.setIcon)(soundBtn, enabled ? "volume-2" : "volume-x");
+      (0, import_obsidian3.setTooltip)(soundBtn, enabled ? "\u0412\u044B\u043A\u043B\u044E\u0447\u0438\u0442\u044C \u0437\u0432\u0443\u043A" : "\u0412\u043A\u043B\u044E\u0447\u0438\u0442\u044C \u0437\u0432\u0443\u043A");
+    };
     soundBtn.addEventListener("click", () => {
       this.plugin.settings.soundEnabled = !this.plugin.settings.soundEnabled;
-      const enabled = this.plugin.settings.soundEnabled;
-      const label = enabled ? "\u0412\u044B\u043A\u043B\u044E\u0447\u0438\u0442\u044C \u0437\u0432\u0443\u043A" : "\u0412\u043A\u043B\u044E\u0447\u0438\u0442\u044C \u0437\u0432\u0443\u043A";
-      (0, import_obsidian2.setIcon)(soundBtn, enabled ? "volume-2" : "volume-x");
-      soundBtn.setAttribute("aria-label", label);
-      soundBtn.title = label;
-      if (enabled)
+      updateSoundLabel();
+      if (this.plugin.settings.soundEnabled)
         this.sounds.play("start");
       void this.plugin.saveSettings();
     });
     const resignBtn = iconButton("flag", "\u0421\u0434\u0430\u0442\u044C\u0441\u044F");
-    resignBtn.addEventListener("click", () => {
-      if (this.controller.resign()) {
-        this.sounds.play("loss");
-        void this.plugin.persistGame();
-      }
-    });
+    resignBtn.addEventListener("click", () => void this.resignWithConfirmation());
     const colorBtn = toolbar.createEl("button", { cls: "chess-bot-color-button" });
     const updateColorLabel = () => {
       const choice = this.plugin.settings.playerColor;
@@ -4124,10 +4500,8 @@ var ChessView = class extends import_obsidian2.ItemView {
       };
       colorBtn.empty();
       colorBtn.createSpan({ cls: `chess-bot-color-dot ${choice}` });
-      colorBtn.setAttribute("aria-label", `\u0426\u0432\u0435\u0442 \u043D\u043E\u0432\u043E\u0439 \u043F\u0430\u0440\u0442\u0438\u0438: ${labels[choice]}`);
-      colorBtn.title = `\u0426\u0432\u0435\u0442 \u043D\u043E\u0432\u043E\u0439 \u043F\u0430\u0440\u0442\u0438\u0438: ${labels[choice]}`;
+      (0, import_obsidian3.setTooltip)(colorBtn, `\u0426\u0432\u0435\u0442 \u043D\u043E\u0432\u043E\u0439 \u043F\u0430\u0440\u0442\u0438\u0438: ${labels[choice]}`);
     };
-    updateColorLabel();
     colorBtn.addEventListener("click", () => {
       const current = this.plugin.settings.playerColor;
       this.plugin.settings.playerColor = current === "w" ? "b" : current === "b" ? "random" : "w";
@@ -4141,29 +4515,84 @@ var ChessView = class extends import_obsidian2.ItemView {
     const updateDifficultyLabel = () => {
       const level = this.plugin.settings.difficulty;
       difficultyBtn.setText(String(level));
-      difficultyBtn.setAttribute("aria-label", `\u0421\u043B\u043E\u0436\u043D\u043E\u0441\u0442\u044C \u0431\u043E\u0442\u0430: ${level}. \u041D\u0430\u0436\u043C\u0438\u0442\u0435 \u0434\u043B\u044F \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0433\u043E \u0443\u0440\u043E\u0432\u043D\u044F`);
-      difficultyBtn.title = `\u0421\u043B\u043E\u0436\u043D\u043E\u0441\u0442\u044C \u0431\u043E\u0442\u0430: ${level} \u0438\u0437 10`;
+      (0, import_obsidian3.setTooltip)(difficultyBtn, [
+        `\u0421\u043B\u043E\u0436\u043D\u043E\u0441\u0442\u044C \u0431\u043E\u0442\u0430: ${level} \u0438\u0437 ${MAX_DIFFICULTY}${this.plugin.describeStreak()}`,
+        this.plugin.describeLevelRecord(level),
+        "\u041A\u043E\u043B\u0435\u0441\u043E \u0438 \u043F\u0440\u0430\u0432\u0430\u044F \u043A\u043D\u043E\u043F\u043A\u0430 \u2014 \u0434\u0440\u0443\u0433\u0438\u0435 \u0443\u0440\u043E\u0432\u043D\u0438"
+      ].filter(Boolean).join(". "));
     };
-    updateDifficultyLabel();
     difficultyBtn.addEventListener("click", () => {
       const current = this.plugin.settings.difficulty;
-      this.plugin.settings.difficulty = current === 10 ? 1 : current + 1;
-      updateDifficultyLabel();
-      void this.plugin.saveSettings();
+      void this.plugin.setDifficulty(current === MAX_DIFFICULTY ? MIN_DIFFICULTY : current + 1);
     });
+    difficultyBtn.addEventListener("wheel", (event) => {
+      event.preventDefault();
+      this.stepDifficulty(event.deltaY < 0 ? 1 : -1);
+    }, { passive: false });
+    difficultyBtn.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.showDifficultyMenu(event);
+    });
+    const updateButtonStates = () => {
+      undoBtn.disabled = !this.controller.canUndo;
+      (0, import_obsidian3.setTooltip)(undoBtn, undoBtn.disabled ? "\u041E\u0442\u043C\u0435\u043D\u0438\u0442\u044C \u0445\u043E\u0434 \u2014 \u043E\u0442\u043C\u0435\u043D\u044F\u0442\u044C \u043F\u043E\u043A\u0430 \u043D\u0435\u0447\u0435\u0433\u043E" : "\u041E\u0442\u043C\u0435\u043D\u0438\u0442\u044C \u0445\u043E\u0434");
+      resignBtn.disabled = this.controller.isGameOver;
+      (0, import_obsidian3.setTooltip)(resignBtn, resignBtn.disabled ? "\u0421\u0434\u0430\u0442\u044C\u0441\u044F \u2014 \u043F\u0430\u0440\u0442\u0438\u044F \u0443\u0436\u0435 \u0437\u0430\u043A\u043E\u043D\u0447\u0435\u043D\u0430" : "\u0421\u0434\u0430\u0442\u044C\u0441\u044F");
+    };
+    this.syncToolbar = () => {
+      updateSoundLabel();
+      updateColorLabel();
+      updateDifficultyLabel();
+      updateButtonStates();
+    };
+    this.syncToolbar();
     this.statusEl = root.createDiv({ cls: "chess-bot-status" });
     const gameInfo = root.createDiv({ cls: "chess-bot-game-info" });
     this.clockEl = gameInfo.createSpan({ cls: "chess-bot-clock" });
     this.scoreEl = gameInfo.createSpan({ cls: "chess-bot-score" });
+    this.evalEl = gameInfo.createSpan({ cls: "chess-bot-eval" });
     this.boardEl = root.createDiv({ cls: "chess-bot-board" });
-    this.boardEl.addEventListener("mousedown", this.handleDragStart);
+    this.boardEl.addEventListener("pointerdown", this.handlePointerDown);
     this.boardEl.addEventListener("contextmenu", (event) => event.preventDefault());
+    const win = this.win;
+    this.boardResize = new win.ResizeObserver(() => this.drawBotMoveArrow());
+    this.boardResize.observe(this.boardEl);
+    root.addEventListener("contextmenu", (event) => {
+      if (!this.controller.isGameOver)
+        return;
+      event.preventDefault();
+      this.startNewGame();
+    });
     this.clearAncestorWidthCaps();
     this.unsubscribe = this.controller.onChange(() => this.render());
     this.flipped = this.controller.humanColor === "b";
+    this.controller.resumeHumanClock();
     this.render();
-    this.clockTimer = window.setInterval(() => this.updateGameInfo(), 250);
+    this.clockTimer = this.win.setInterval(() => this.updateClock(), 250);
     void this.maybeTriggerBot();
+  }
+  /** Called by the plugin when a setting the board mirrors changed elsewhere. */
+  refreshFromSettings() {
+    this.syncToolbar();
+    this.drawBotMoveArrow();
+  }
+  stepDifficulty(step) {
+    const next = clampDifficulty(this.plugin.settings.difficulty + step);
+    if (next !== this.plugin.settings.difficulty)
+      void this.plugin.setDifficulty(next);
+  }
+  /** The whole ladder in one menu, each level with what it plays like and how
+   *  the games against it have gone. */
+  showDifficultyMenu(event) {
+    const menu = new import_obsidian3.Menu();
+    const current = this.plugin.settings.difficulty;
+    for (let level = MIN_DIFFICULTY; level <= MAX_DIFFICULTY; level++) {
+      const value = level;
+      const record = formatRecord(this.plugin.settings.levelStats[value]);
+      menu.addItem((item) => item.setTitle(record ? `${describeDifficulty(value)}  \xB7  ${record}` : describeDifficulty(value)).setChecked(value === current).onClick(() => void this.plugin.setDifficulty(value)));
+    }
+    menu.showAtMouseEvent(event);
   }
   /**
    * Obsidian's readable-line-length machinery can cap a pane's content width
@@ -4175,7 +4604,7 @@ var ChessView = class extends import_obsidian2.ItemView {
   clearAncestorWidthCaps() {
     let el = this.contentEl;
     while (el) {
-      el.style.maxWidth = "none";
+      el.setCssStyles({ maxWidth: "none" });
       if (el.hasClass("view-content"))
         break;
       el = el.parentElement;
@@ -4184,38 +4613,50 @@ var ChessView = class extends import_obsidian2.ItemView {
   async onClose() {
     this.finishDrag();
     this.sounds.close();
+    this.boardResize?.disconnect();
+    this.boardResize = null;
     if (this.clockTimer !== null)
-      window.clearInterval(this.clockTimer);
+      this.win.clearInterval(this.clockTimer);
     this.clockTimer = null;
+    this.controller.pauseHumanClock();
     void this.plugin.persistGame();
     this.unsubscribe?.();
     this.unsubscribe = null;
+  }
+  cancelDrag() {
+    this.finishDrag();
+    this.selected = null;
+    this.legalTargets.clear();
+    this.render();
   }
   createDragPreview(square) {
     const piece = this.controller.chess.get(square);
     const source = this.boardEl.querySelector(`[data-square="${square}"]`);
     if (!piece || !source)
       return null;
-    const preview = document.createElement("span");
+    const preview = this.doc.createElement("span");
     preview.className = "chess-bot-drag-preview";
     const size = source.getBoundingClientRect().width * 0.88;
-    preview.style.width = `${size}px`;
-    preview.style.height = `${size}px`;
-    preview.appendChild(createPieceImage(piece.type, piece.color));
-    document.body.appendChild(preview);
+    preview.setCssStyles({ width: `${size}px`, height: `${size}px` });
+    preview.appendChild(createPieceImage(piece.type, piece.color, this.doc));
+    this.doc.body.appendChild(preview);
     return preview;
   }
   squareUnderPointer(x, y) {
-    const cell = document.elementFromPoint(x, y)?.closest(".chess-bot-square");
+    const cell = this.doc.elementFromPoint(x, y)?.closest(".chess-bot-square");
     if (!cell || !this.boardEl.contains(cell))
       return null;
     return cell.dataset.square ?? null;
   }
   finishDrag() {
-    document.removeEventListener("mousemove", this.handleDragMove);
-    document.removeEventListener("mouseup", this.handleDragEnd);
+    this.doc.removeEventListener("pointermove", this.handlePointerMove);
+    this.doc.removeEventListener("pointerup", this.handlePointerUp);
+    this.doc.removeEventListener("pointercancel", this.handlePointerCancel);
+    this.doc.removeEventListener("pointerdown", this.handleDragAbort, true);
+    this.doc.removeEventListener("contextmenu", this.handleDragAbort, true);
     this.drag?.preview?.remove();
     this.drag = null;
+    this.pressSquare = null;
     this.boardEl?.removeClass("dragging");
     this.boardEl?.querySelector(".drag-source")?.removeClass("drag-source");
   }
@@ -4225,10 +4666,25 @@ var ChessView = class extends import_obsidian2.ItemView {
     this.selected = null;
     this.legalTargets.clear();
     this.flipped = humanColor === "b";
-    this.controller.newGame(humanColor);
+    this.controller.newGame(humanColor, this.plugin.timeControlMs, this.plugin.incrementMs);
     this.sounds.play("start");
     void this.plugin.persistGame();
     void this.maybeTriggerBot();
+  }
+  async resignWithConfirmation() {
+    if (this.controller.isGameOver)
+      return;
+    const cost = this.plugin.settings.adaptiveDifficulty ? " \u041F\u0430\u0440\u0442\u0438\u044F \u043F\u043E\u0439\u0434\u0451\u0442 \u0432 \u0441\u0447\u0451\u0442 \u043A\u0430\u043A \u043F\u043E\u0440\u0430\u0436\u0435\u043D\u0438\u0435." : "";
+    const agreed = await confirm(
+      this.app,
+      "\u0421\u0434\u0430\u0442\u044C\u0441\u044F?",
+      `\u041F\u0430\u0440\u0442\u0438\u044F \u0437\u0430\u043A\u043E\u043D\u0447\u0438\u0442\u0441\u044F \u043F\u043E\u0440\u0430\u0436\u0435\u043D\u0438\u0435\u043C, \u043E\u0442\u043C\u0435\u043D\u0438\u0442\u044C \u044D\u0442\u043E \u043C\u043E\u0436\u043D\u043E \u0442\u043E\u043B\u044C\u043A\u043E \u043A\u043D\u043E\u043F\u043A\u043E\u0439 \xAB\u041E\u0442\u043C\u0435\u043D\u0438\u0442\u044C \u0445\u043E\u0434\xBB.${cost}`,
+      "\u0421\u0434\u0430\u0442\u044C\u0441\u044F"
+    );
+    if (!agreed || !this.controller.resign())
+      return;
+    this.sounds.play("loss");
+    void this.plugin.persistGame();
   }
   async maybeTriggerBot() {
     if (this.controller.isGameOver)
@@ -4271,10 +4727,23 @@ var ChessView = class extends import_obsidian2.ItemView {
       }
       return;
     }
-    if (piece && piece.color === this.controller.humanColor) {
-      this.selected = square;
-      this.legalTargets = new Set(legalMovesFrom(this.controller.chess, square).map((m) => m.to));
+    if (square === this.selected) {
+      this.selected = null;
+      this.legalTargets.clear();
       this.render();
+      return;
+    }
+    if (piece && piece.color === this.controller.humanColor) {
+      const moves = legalMovesFrom(this.controller.chess, square);
+      this.selected = square;
+      this.legalTargets = new Set(moves.map((m) => m.to));
+      this.render();
+      if (moves.length === 0)
+        this.flashIllegal(square, this.checkedKingSquare(square));
+      return;
+    }
+    if (this.selected) {
+      this.flashIllegal(square);
       return;
     }
     this.selected = null;
@@ -4294,22 +4763,29 @@ var ChessView = class extends import_obsidian2.ItemView {
   pickPromotion() {
     return new Promise((resolve) => {
       const color = this.controller.humanColor;
-      const overlay = document.body.createDiv({ cls: "chess-bot-promo-overlay" });
+      const overlay = this.doc.body.createDiv({ cls: "chess-bot-promo-overlay" });
       const box = overlay.createDiv({ cls: "chess-bot-promo-choices" });
       const options = ["q", "r", "b", "n"];
       const finish = (result) => {
+        this.doc.removeEventListener("keydown", onKey);
         overlay.remove();
         resolve(result);
       };
+      const onKey = (e) => {
+        if (e.key === "Escape")
+          finish(void 0);
+      };
       for (const type of options) {
-        const btn = box.createEl("button", { attr: { "aria-label": this.promotionLabel(type) } });
-        btn.appendChild(createPieceImage(type, color));
+        const btn = box.createEl("button");
+        (0, import_obsidian3.setTooltip)(btn, this.promotionLabel(type));
+        btn.appendChild(createPieceImage(type, color, this.doc));
         btn.addEventListener("click", () => finish(type));
       }
       overlay.addEventListener("click", (e) => {
         if (e.target === overlay)
           finish(void 0);
       });
+      this.doc.addEventListener("keydown", onKey);
     });
   }
   promotionLabel(type) {
@@ -4325,11 +4801,11 @@ var ChessView = class extends import_obsidian2.ItemView {
   }
   render() {
     const { chess, humanColor, thinking, resigned } = this.controller;
-    this.statusEl.setText(this.controller.timedOut ? "\u0412\u0440\u0435\u043C\u044F \u0432\u044B\u0448\u043B\u043E \u2014 \u0432\u044B \u043F\u0440\u043E\u0438\u0433\u0440\u0430\u043B\u0438." : statusText(chess, humanColor, thinking, resigned));
+    this.statusEl.setText(this.currentStatusText(chess, humanColor, thinking, resigned));
+    this.syncToolbar();
     this.updateGameInfo();
     this.boardEl.empty();
-    const history = chess.history({ verbose: true });
-    const last = history[history.length - 1];
+    const last = this.controller.lastMove;
     const kingInCheck = chess.isCheck() ? findKing(chess, chess.turn()) : null;
     for (let r = 0; r < 8; r++) {
       for (let f = 0; f < 8; f++) {
@@ -4351,56 +4827,208 @@ var ChessView = class extends import_obsidian2.ItemView {
         }
         if (piece) {
           const figure = cellEl.createSpan({ cls: "chess-bot-piece" });
-          figure.appendChild(createPieceImage(piece.type, piece.color));
+          figure.appendChild(createPieceImage(piece.type, piece.color, this.doc));
         }
-        cellEl.addEventListener("click", () => {
-          if (performance.now() < this.suppressClickUntil)
-            return;
-          void this.handleSquareClick(square);
-        });
       }
     }
+    this.drawBotMoveArrow();
   }
-  updateGameInfo() {
+  /**
+   * The bot's last move, drawn as an arrow across the board. Two squares tinted
+   * the same colour do not say which of them the piece came from, and on a full
+   * board the pair is easy to miss entirely. Only the bot's move gets one: the
+   * person already knows what they just played.
+   *
+   * Everything is measured in pixels off the squares themselves rather than
+   * derived from the board's width, because the 2px grid gaps and 3px padding
+   * do not scale with it: an arrow drawn for one size and stretched to another
+   * drifts off the centre of a square by more than a whole square's width by
+   * the far corner. Cheap enough to simply redraw — see the ResizeObserver.
+   */
+  drawBotMoveArrow() {
+    if (!this.boardEl)
+      return;
+    this.boardEl.querySelector(".chess-bot-move-arrow")?.remove();
+    if (!this.plugin.settings.showMoveArrow)
+      return;
+    const move = this.controller.lastMove;
+    if (!move || move.color === this.controller.humanColor)
+      return;
+    const fromEl = this.boardEl.querySelector(`[data-square="${move.from}"]`);
+    const toEl = this.boardEl.querySelector(`[data-square="${move.to}"]`);
+    if (!fromEl || !toEl)
+      return;
+    const cell = fromEl.offsetWidth;
+    if (cell <= 0)
+      return;
+    const centre = (el) => ({
+      x: el.offsetLeft + el.offsetWidth / 2,
+      y: el.offsetTop + el.offsetHeight / 2
+    });
+    const start = centre(fromEl);
+    const end = centre(toEl);
+    const length = Math.hypot(end.x - start.x, end.y - start.y);
+    if (length === 0)
+      return;
+    const ux = (end.x - start.x) / length;
+    const uy = (end.y - start.y) / length;
+    const tipX = end.x - ux * cell * 0.14;
+    const tipY = end.y - uy * cell * 0.14;
+    const head = cell * 0.38;
+    const halfHead = cell * 0.23;
+    const baseX = tipX - ux * head;
+    const baseY = tipY - uy * head;
+    const svg = this.boardEl.createSvg("svg", { cls: "chess-bot-move-arrow" });
+    svg.setAttribute("viewBox", `0 0 ${this.boardEl.clientWidth} ${this.boardEl.clientHeight}`);
+    svg.setAttribute("preserveAspectRatio", "none");
+    svg.createSvg("line", {
+      attr: {
+        x1: start.x,
+        y1: start.y,
+        x2: baseX,
+        y2: baseY,
+        "stroke-width": cell * 0.15,
+        "stroke-linecap": "round"
+      }
+    });
+    svg.createSvg("polygon", {
+      attr: {
+        points: [
+          `${tipX},${tipY}`,
+          `${baseX - uy * halfHead},${baseY + ux * halfHead}`,
+          `${baseX + uy * halfHead},${baseY - ux * halfHead}`
+        ].join(" ")
+      }
+    });
+  }
+  /**
+   * Answers a move that cannot be played. Without it a click that misses is
+   * indistinguishable from one the board ignored, and a piece that is pinned or
+   * stuck behind a check looks simply broken — so the king is flashed too, since
+   * that is where the reason usually is.
+   */
+  flashIllegal(...squares) {
+    for (const square of squares) {
+      if (!square)
+        continue;
+      const cell = this.boardEl.querySelector(`[data-square="${square}"]`);
+      if (!cell)
+        continue;
+      cell.removeClass("illegal");
+      void cell.offsetWidth;
+      cell.addClass("illegal");
+      this.win.setTimeout(() => cell.removeClass("illegal"), ILLEGAL_FLASH_MS);
+    }
+  }
+  /** The king, when it is in check and is not the piece being complained about. */
+  checkedKingSquare(clicked) {
+    const { chess } = this.controller;
+    if (!chess.isCheck())
+      return null;
+    const king = findKing(chess, this.controller.humanColor);
+    return king === clicked ? null : king;
+  }
+  currentStatusText(chess, humanColor, thinking, resigned) {
+    if (this.controller.engineError)
+      return "\u0414\u0432\u0438\u0436\u043E\u043A \u043D\u0435 \u0437\u0430\u043F\u0443\u0441\u0442\u0438\u043B\u0441\u044F \u2014 \u0431\u043E\u0442 \u043D\u0435 \u043C\u043E\u0436\u0435\u0442 \u0441\u0445\u043E\u0434\u0438\u0442\u044C.";
+    const base = this.controller.timedOut ? "\u0412\u0440\u0435\u043C\u044F \u0432\u044B\u0448\u043B\u043E \u2014 \u0432\u044B \u043F\u0440\u043E\u0438\u0433\u0440\u0430\u043B\u0438." : statusText(chess, humanColor, thinking, resigned);
+    return this.controller.isGameOver ? `${base} \u041F\u0440\u0430\u0432\u0430\u044F \u043A\u043D\u043E\u043F\u043A\u0430 \u2014 \u043D\u043E\u0432\u0430\u044F \u043F\u0430\u0440\u0442\u0438\u044F.` : base;
+  }
+  updateClock() {
+    const clockEnabled = this.controller.clockEnabled;
+    this.clockEl.toggleClass("hidden", !clockEnabled);
+    if (!clockEnabled)
+      return;
     const remaining = this.controller.remainingHumanTimeMs;
     const totalSeconds = Math.max(0, Math.ceil(remaining / 1e3));
     const minutes = Math.floor(totalSeconds / 60);
     const seconds = String(totalSeconds % 60).padStart(2, "0");
-    this.clockEl.setText(`\u23F1 ${minutes}:${seconds}`);
+    const increment = this.controller.incrementMs / 1e3;
+    this.clockEl.setText(`\u23F1 ${minutes}:${seconds}${increment > 0 ? ` +${increment}` : ""}`);
     this.clockEl.toggleClass("low", remaining > 0 && remaining <= 6e4);
-    const human = this.controller.humanColor;
-    const opponent = human === "w" ? "b" : "w";
-    const humanPoints = this.capturedPoints(human);
-    const botPoints = this.capturedPoints(opponent);
-    const balance = humanPoints - botPoints;
-    this.scoreEl.setText(balance > 0 ? `+${balance}` : String(balance).replace("-", "\u2212"));
-    this.scoreEl.title = `\u041C\u0430\u0442\u0435\u0440\u0438\u0430\u043B: \u0432\u044B ${humanPoints} \u2014 ${botPoints} \u0431\u043E\u0442`;
-    this.scoreEl.toggleClass("advantage", balance > 0);
-    this.scoreEl.toggleClass("disadvantage", balance < 0);
+    const started = this.controller.clockStarted;
+    const bonus = increment > 0 ? `, +${increment} \u0441 \u0437\u0430 \u043A\u0430\u0436\u0434\u044B\u0439 \u0432\u0430\u0448 \u0445\u043E\u0434` : "";
+    this.clockEl.toggleClass("waiting", !started);
+    (0, import_obsidian3.setTooltip)(this.clockEl, started ? `\u0412\u0430\u0448\u0435 \u0432\u0440\u0435\u043C\u044F \u043D\u0430 \u043F\u0430\u0440\u0442\u0438\u044E${bonus}` : `\u0427\u0430\u0441\u044B \u043F\u043E\u0439\u0434\u0443\u0442 \u0441 \u0432\u0430\u0448\u0435\u0433\u043E \u043F\u0435\u0440\u0432\u043E\u0433\u043E \u0445\u043E\u0434\u0430${bonus}`);
     if (remaining <= 0 && this.controller.expireHumanClock()) {
       this.sounds.play("loss");
       void this.plugin.persistGame();
     }
   }
-  capturedPoints(color) {
-    const values = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
-    let score = 0;
-    const history = this.controller.chess.history({ verbose: true });
-    for (const move of history) {
-      if (move.color === color && move.captured)
-        score += values[move.captured];
+  updateGameInfo() {
+    this.updateClock();
+    const human = this.controller.humanColor;
+    const opponent = human === "w" ? "b" : "w";
+    const { [human]: humanPoints, [opponent]: botPoints } = this.materialPoints();
+    const balance = humanPoints - botPoints;
+    this.scoreEl.setText(balance > 0 ? `+${balance}` : String(balance).replace("-", "\u2212"));
+    (0, import_obsidian3.setTooltip)(this.scoreEl, `\u041C\u0430\u0442\u0435\u0440\u0438\u0430\u043B \u043D\u0430 \u0434\u043E\u0441\u043A\u0435: \u0432\u044B ${humanPoints} \u2014 ${botPoints} \u0431\u043E\u0442`);
+    this.scoreEl.toggleClass("advantage", balance > 0);
+    this.scoreEl.toggleClass("disadvantage", balance < 0);
+    this.updateEvaluation();
+  }
+  updateEvaluation() {
+    const last = this.controller.lastEval;
+    const book = this.controller.lastMoveFromBook;
+    const show = this.plugin.settings.showEvaluation && (last !== null || book);
+    this.evalEl.toggleClass("hidden", !show);
+    if (!show)
+      return;
+    if (book || !last) {
+      this.evalEl.setText("\u043A\u043D\u0438\u0433\u0430");
+      (0, import_obsidian3.setTooltip)(this.evalEl, "\u0425\u043E\u0434 \u0438\u0437 \u0434\u0435\u0431\u044E\u0442\u043D\u043E\u0439 \u043A\u043D\u0438\u0433\u0438 \u2014 \u0431\u043E\u0442 \u0435\u0433\u043E \u043D\u0435 \u0441\u0447\u0438\u0442\u0430\u043B");
+      this.evalEl.removeClass("advantage");
+      this.evalEl.removeClass("disadvantage");
+      return;
     }
-    return score;
+    const fromHuman = this.controller.humanColor === "w" ? last.cp : -last.cp;
+    if (Math.abs(fromHuman) >= MATE_THRESHOLD) {
+      this.evalEl.setText(fromHuman > 0 ? "\u043C\u0430\u0442" : "\u2212\u043C\u0430\u0442");
+    } else {
+      const pawns = fromHuman / 100;
+      this.evalEl.setText(`${pawns > 0 ? "+" : pawns < 0 ? "\u2212" : ""}${Math.abs(pawns).toFixed(1)}`);
+    }
+    (0, import_obsidian3.setTooltip)(this.evalEl, `\u041E\u0446\u0435\u043D\u043A\u0430 \u0431\u043E\u0442\u0430 \u043F\u043E\u0441\u043B\u0435 \u0435\u0433\u043E \u0445\u043E\u0434\u0430, \u0433\u043B\u0443\u0431\u0438\u043D\u0430 ${last.depth}`);
+    this.evalEl.toggleClass("advantage", fromHuman > 0);
+    this.evalEl.toggleClass("disadvantage", fromHuman < 0);
+  }
+  /**
+   * Material each side still has, read straight off the position.
+   *
+   * This used to add up captures from the verbose game history instead, which
+   * costs 6 ms once a game passes 120 plies (reading the board costs ~1 µs) and
+   * quietly ignored promotions: a bot that queened a pawn left the balance
+   * showing whatever it was before, so the pill said "even" in a lost position.
+   */
+  materialPoints() {
+    const values = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
+    const points = { w: 0, b: 0 };
+    for (const row of this.controller.chess.board()) {
+      for (const cell of row) {
+        if (cell)
+          points[cell.color] += values[cell.type];
+      }
+    }
+    return points;
   }
 };
 
 // src/main.ts
-var ChessBotPlugin = class extends import_obsidian3.Plugin {
+var MAX_TIME_CONTROL_MINUTES = 180;
+var ChessBotPlugin = class extends import_obsidian4.Plugin {
   async onload() {
     await this.loadSettings();
     this.controller = new GameController();
     if (this.settings.savedGame)
       this.controller.restore(this.settings.savedGame);
+    else {
+      this.controller.newGame(
+        this.settings.playerColor === "b" ? "b" : "w",
+        this.timeControlMs,
+        this.incrementMs
+      );
+    }
+    this.controller.onChange(() => this.onGameChanged());
     this.registerView(VIEW_TYPE_CHESS, (leaf) => new ChessView(leaf, this));
     this.addRibbonIcon("crown", "\u041E\u0442\u043A\u0440\u044B\u0442\u044C \u0448\u0430\u0445\u043C\u0430\u0442\u044B", () => this.activateView());
     this.addCommand({
@@ -4419,16 +5047,192 @@ var ChessBotPlugin = class extends import_obsidian3.Plugin {
     }
     await workspace.revealLeaf(leaf);
   }
+  get timeControlMs() {
+    return this.settings.timeControlMinutes * 60 * 1e3;
+  }
+  get incrementMs() {
+    return this.settings.incrementSeconds * 1e3;
+  }
+  /** Setting the level by hand is a statement about where you want to play, so
+   *  it also wipes the streak — otherwise two old wins would immediately push
+   *  the level past the one just chosen. */
+  async setDifficulty(level) {
+    this.settings.difficulty = clampDifficulty(level);
+    this.settings.resultStreak = 0;
+    await this.saveSettings();
+  }
+  /** "Побед 4 · поражений 2 · ничьих 1" at one level, for the board and the
+   *  settings tab. Empty for a level with no finished games behind it. */
+  describeLevelRecord(level) {
+    return describeRecord(this.settings.levelStats[level]);
+  }
+  /** " · побед подряд: 2 из 3" for the difficulty button's tooltip. */
+  describeStreak() {
+    if (!this.settings.adaptiveDifficulty)
+      return "";
+    const streak = this.settings.resultStreak;
+    if (streak === 0)
+      return "";
+    const threshold = this.settings.adaptiveThreshold;
+    const word = streak > 0 ? "\u043F\u043E\u0431\u0435\u0434" : "\u043F\u043E\u0440\u0430\u0436\u0435\u043D\u0438\u0439";
+    return ` \xB7 ${word} \u043F\u043E\u0434\u0440\u044F\u0434: ${Math.abs(streak)} \u0438\u0437 ${threshold}`;
+  }
+  /**
+   * Runs on every controller notification. The tally is settled before adaptive
+   * difficulty gets a look in, so a game is counted against the level it was
+   * actually played at rather than the one its own result just moved it to.
+   */
+  onGameChanged() {
+    const counted = this.syncLevelStats();
+    const levelMoved = this.syncAdaptiveDifficulty();
+    if (counted || levelMoved)
+      void this.persistGame();
+  }
+  /**
+   * Keeps the per-level tally in step with the game on the board, on the same
+   * terms as adaptive difficulty: a result counts once, a game that was already
+   * over when the vault opened counts for nothing, and undoing back into a live
+   * position takes the result back out of the counters.
+   *
+   * Returns whether anything changed, so the caller can decide to save.
+   */
+  syncLevelStats() {
+    const recorded = this.controller.statsRecorded;
+    if (!this.controller.isGameOver) {
+      if (!recorded)
+        return false;
+      this.adjustLevelRecord(recorded.level, recorded.outcome, -1);
+      this.controller.statsRecorded = null;
+      return true;
+    }
+    if (recorded)
+      return false;
+    const outcome = this.controller.outcome;
+    if (!outcome)
+      return false;
+    const level = this.settings.difficulty;
+    this.adjustLevelRecord(level, outcome, 1);
+    this.controller.statsRecorded = { level, outcome };
+    return true;
+  }
+  /** Moves one counter by one game. A level of 0 is the "belongs to no bucket"
+   *  marker a pre-existing finished game carries, and touches nothing. */
+  adjustLevelRecord(level, outcome, delta) {
+    if (!Number.isInteger(level) || level < MIN_DIFFICULTY || level > MAX_DIFFICULTY)
+      return;
+    const key = level;
+    const record = this.settings.levelStats[key] ?? { wins: 0, losses: 0, draws: 0 };
+    const counter = outcome === "win" ? "wins" : outcome === "loss" ? "losses" : "draws";
+    record[counter] = Math.max(0, record[counter] + delta);
+    if (record.wins + record.losses + record.draws === 0)
+      delete this.settings.levelStats[key];
+    else
+      this.settings.levelStats[key] = record;
+  }
+  /**
+   * Adaptive difficulty: the level moves a step once the same result comes up
+   * `adaptiveThreshold` games in a row. A draw of any kind — stalemate
+   * included — breaks the streak without moving anything.
+   *
+   * Driven off controller notifications rather than the view, so it also fires
+   * for a game that ends while the board is not the active tab. What it did is
+   * recorded on the game itself: reopening the vault must not count the same
+   * result a second time, and undoing back into a live position takes it back.
+   */
+  syncAdaptiveDifficulty() {
+    if (!this.settings.adaptiveDifficulty)
+      return false;
+    const applied = this.controller.resultApplied;
+    if (!this.controller.isGameOver) {
+      if (!applied)
+        return false;
+      if (applied.to !== applied.from && this.settings.difficulty === applied.to) {
+        this.settings.difficulty = clampDifficulty(applied.from);
+      }
+      this.settings.resultStreak = applied.streakBefore;
+      this.controller.resultApplied = null;
+      return true;
+    }
+    if (applied)
+      return false;
+    const outcome = this.controller.outcome;
+    if (!outcome)
+      return false;
+    const from = this.settings.difficulty;
+    const streakBefore = this.settings.resultStreak;
+    const threshold = this.settings.adaptiveThreshold;
+    let streak;
+    if (outcome === "win")
+      streak = streakBefore > 0 ? streakBefore + 1 : 1;
+    else if (outcome === "loss")
+      streak = streakBefore < 0 ? streakBefore - 1 : -1;
+    else
+      streak = 0;
+    const runLength = Math.abs(streak);
+    const reached = runLength >= threshold;
+    let to = from;
+    if (reached)
+      to = clampDifficulty(from + (streak > 0 ? 1 : -1));
+    if (reached)
+      streak = 0;
+    this.settings.difficulty = to;
+    this.settings.resultStreak = streak;
+    this.controller.resultApplied = { from, to, streakBefore };
+    let notice = "";
+    if (to > from)
+      notice = `\u041F\u043E\u0431\u0435\u0434\u0430! \u0421\u043B\u043E\u0436\u043D\u043E\u0441\u0442\u044C \u0431\u043E\u0442\u0430 \u043F\u043E\u0432\u044B\u0448\u0435\u043D\u0430 \u0434\u043E ${to}.`;
+    else if (to < from)
+      notice = `\u041F\u043E\u0440\u0430\u0436\u0435\u043D\u0438\u0435. \u0421\u043B\u043E\u0436\u043D\u043E\u0441\u0442\u044C \u0431\u043E\u0442\u0430 \u043F\u043E\u043D\u0438\u0436\u0435\u043D\u0430 \u0434\u043E ${to}.`;
+    else if (outcome === "draw") {
+      if (streakBefore !== 0)
+        notice = "\u041D\u0438\u0447\u044C\u044F \u2014 \u0441\u0435\u0440\u0438\u044F \u043F\u0440\u0435\u0440\u0432\u0430\u043D\u0430, \u0441\u043B\u043E\u0436\u043D\u043E\u0441\u0442\u044C \u043F\u0440\u0435\u0436\u043D\u044F\u044F.";
+    } else if (reached) {
+      notice = outcome === "win" ? `\u041F\u043E\u0431\u0435\u0434\u0430! \u0421\u043B\u043E\u0436\u043D\u043E\u0441\u0442\u044C \u0443\u0436\u0435 \u043C\u0430\u043A\u0441\u0438\u043C\u0430\u043B\u044C\u043D\u0430\u044F (${MAX_DIFFICULTY}).` : `\u041F\u043E\u0440\u0430\u0436\u0435\u043D\u0438\u0435. \u0421\u043B\u043E\u0436\u043D\u043E\u0441\u0442\u044C \u0443\u0436\u0435 \u043C\u0438\u043D\u0438\u043C\u0430\u043B\u044C\u043D\u0430\u044F (${MIN_DIFFICULTY}).`;
+    } else {
+      notice = outcome === "win" ? `\u041F\u043E\u0431\u0435\u0434\u0430! \u041F\u043E\u0431\u0435\u0434 \u043F\u043E\u0434\u0440\u044F\u0434: ${runLength} \u0438\u0437 ${threshold}.` : `\u041F\u043E\u0440\u0430\u0436\u0435\u043D\u0438\u0435. \u041F\u043E\u0440\u0430\u0436\u0435\u043D\u0438\u0439 \u043F\u043E\u0434\u0440\u044F\u0434: ${runLength} \u0438\u0437 ${threshold}.`;
+    }
+    if (notice)
+      new import_obsidian4.Notice(notice, 5e3);
+    return true;
+  }
+  /** Pushes settings the board mirrors (level, colour, sound, move arrow) back
+   *  into any open board, so nothing there sits on a stale value. */
+  refreshBoards() {
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_CHESS)) {
+      if (leaf.view instanceof ChessView)
+        leaf.view.refreshFromSettings();
+    }
+  }
   async persistGame() {
     this.settings.savedGame = this.controller.serialize();
     await this.saveSettings();
   }
+  /**
+   * data.json is a plain file the person can edit, and a value out of range is
+   * not harmless: a difficulty with no profile behind it left the bot silently
+   * refusing to move, with the status line stuck on "Ход бота".
+   */
   async loadSettings() {
     const raw = await this.loadData();
     this.settings = { ...DEFAULT_SETTINGS, ...raw ?? {} };
+    this.settings.difficulty = clampDifficulty(this.settings.difficulty);
+    const minutes = Math.round(Number(this.settings.timeControlMinutes));
+    this.settings.timeControlMinutes = Number.isFinite(minutes) ? Math.min(MAX_TIME_CONTROL_MINUTES, Math.max(0, minutes)) : DEFAULT_SETTINGS.timeControlMinutes;
+    const increment = Math.round(Number(this.settings.incrementSeconds));
+    this.settings.incrementSeconds = Number.isFinite(increment) ? Math.min(60, Math.max(0, increment)) : DEFAULT_SETTINGS.incrementSeconds;
+    const volume = Math.round(Number(this.settings.soundVolume));
+    this.settings.soundVolume = Number.isFinite(volume) ? Math.min(100, Math.max(0, volume)) : DEFAULT_SETTINGS.soundVolume;
+    this.settings.adaptiveThreshold = clampAdaptiveThreshold(this.settings.adaptiveThreshold);
+    const streak = Math.round(Number(this.settings.resultStreak));
+    this.settings.resultStreak = Number.isFinite(streak) ? streak : 0;
+    this.settings.levelStats = sanitizeLevelStats(this.settings.levelStats);
+    if (!["w", "b", "random"].includes(this.settings.playerColor)) {
+      this.settings.playerColor = DEFAULT_SETTINGS.playerColor;
+    }
   }
   async saveSettings() {
     await this.saveData(this.settings);
+    this.refreshBoards();
   }
 };
 /*! Bundled license information:

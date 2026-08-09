@@ -72,6 +72,14 @@
   padding: 0;
 }
 
+/* Undo with nothing to take back, resigning an already finished game: the
+   button says so instead of swallowing the click. */
+.chess-bot-toolbar button:disabled {
+  opacity: 0.38;
+  box-shadow: none;
+  cursor: default;
+}
+
 .chess-bot-status {
   min-height: 1.4em;
   font-weight: 600;
@@ -89,7 +97,8 @@
 }
 
 .chess-bot-clock,
-.chess-bot-score {
+.chess-bot-score,
+.chess-bot-eval {
   padding: 3px 8px;
   border: 1px solid var(--background-modifier-border);
   border-radius: 999px;
@@ -97,25 +106,41 @@
   white-space: nowrap;
 }
 
-.chess-bot-score {
+.chess-bot-score,
+.chess-bot-eval {
   min-width: 30px;
   padding-inline: 7px;
   text-align: center;
   font-weight: 650;
 }
 
-.chess-bot-score.advantage { color: var(--text-success); }
-.chess-bot-score.disadvantage { color: var(--text-error); }
+.chess-bot-eval { font-weight: 500; }
+
+.chess-bot-game-info .hidden { display: none; }
+
+.chess-bot-score.advantage,
+.chess-bot-eval.advantage { color: var(--text-success); }
+
+.chess-bot-score.disadvantage,
+.chess-bot-eval.disadvantage { color: var(--text-error); }
 
 .chess-bot-clock.low {
   color: var(--text-error);
   border-color: color-mix(in srgb, var(--text-error) 45%, transparent);
 }
 
+/* Before the first move the clock is deliberately standing still. */
+.chess-bot-clock.waiting {
+  opacity: 0.55;
+  font-style: italic;
+}
+
 .chess-bot-board {
   display: grid;
   grid-template-columns: repeat(8, 1fr);
   gap: 2px;
+  /* Also makes the board the offset parent the move arrow measures against. */
+  position: relative;
   width: 100%;
   max-width: 520px;
   padding: 3px;
@@ -127,7 +152,8 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.16),
     0 0 0 1px rgba(8, 15, 24, 0.55);
   user-select: none;
-  touch-action: manipulation;
+  /* Dragging a piece is a pointer gesture on the board, not a page scroll. */
+  touch-action: none;
 }
 
 .chess-bot-board.dragging,
@@ -141,7 +167,6 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: min(6vw, 34px);
   line-height: 1;
   cursor: pointer;
   border-radius: 3px;
@@ -170,7 +195,14 @@
     inset -2px -2px 5px rgba(4, 8, 14, 0.24);
 }
 
-.chess-bot-square.selected { outline: 3px solid var(--interactive-accent) inset; }
+/* `outline: … inset` is invalid — it names outline-style twice (solid + inset),
+   so the whole declaration was dropped and the selected square showed nothing.
+   A negative offset draws the same inner ring and leaves the square's own
+   inset shading (set by .light/.dark as box-shadow) intact. */
+.chess-bot-square.selected {
+  outline: 3px solid var(--interactive-accent);
+  outline-offset: -3px;
+}
 
 .chess-bot-square.legal-target::after {
   content: "";
@@ -204,6 +236,56 @@
 }
 
 .chess-bot-square.in-check { box-shadow: 0 0 0 3px var(--text-error) inset; }
+
+/* An answer to a move that cannot be played. Short on purpose: it is a reply to
+   a click, not an alarm. */
+@keyframes chess-bot-illegal-flash {
+  from { opacity: 0.45; }
+  to { opacity: 0; }
+}
+
+@keyframes chess-bot-illegal-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-7%); }
+  55% { transform: translateX(7%); }
+  80% { transform: translateX(-3%); }
+}
+
+.chess-bot-square.illegal::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--text-error);
+  border-radius: inherit;
+  pointer-events: none;
+  animation: chess-bot-illegal-flash 340ms ease-out forwards;
+}
+
+.chess-bot-square.illegal .chess-bot-piece {
+  animation: chess-bot-illegal-shake 340ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chess-bot-square.illegal .chess-bot-piece { animation: none; }
+}
+
+/* The bot's last move: which square the piece came from is not something two
+   equally tinted squares can say. */
+.chess-bot-move-arrow {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 2;
+  pointer-events: none;
+  color: #f0cf5c;
+  opacity: 0.7;
+  filter: drop-shadow(0 1px 1px rgba(6, 11, 18, 0.55));
+}
+
+.chess-bot-move-arrow line { stroke: currentColor; }
+
+.chess-bot-move-arrow polygon { fill: currentColor; }
 
 .chess-bot-piece {
   position: relative;
@@ -239,11 +321,6 @@
   object-fit: contain;
   filter: drop-shadow(0 1.5px 1px rgba(0, 0, 0, 0.28));
   user-select: none;
-}
-
-.chess-bot-thinking {
-  opacity: 0.7;
-  font-style: italic;
 }
 
 .chess-bot-promo-overlay {

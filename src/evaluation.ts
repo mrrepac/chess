@@ -1,8 +1,8 @@
-import type { Chess } from "chess.js";
+import type { EngineBoard } from "./engine-board";
 
 const PIECE_VALUE: Record<string, number> = { p: 100, n: 320, b: 330, r: 500, q: 900, k: 0 };
 
-// Index 0 = rank 8 (a8..h8), index 7 = rank 1 (a1..h1) — matches chess.js's board() order.
+// Index 0 = rank 8 (a8..h8), index 7 = rank 1 (a1..h1) — matches the 0x88 rank order.
 const PAWN_PST = [
   [0, 0, 0, 0, 0, 0, 0, 0],
   [50, 50, 50, 50, 50, 50, 50, 50],
@@ -69,34 +69,42 @@ const PST: Record<string, number[][]> = {
 };
 
 const BISHOP_PAIR_BONUS = 30;
-const MOBILITY_WEIGHT = 2;
+/** Small edge for having the move. Replaces the old mobility term, which only
+ *  counted the side to move and so swung the score by up to ~80cp depending on
+ *  whose turn a leaf happened to land on — a parity bias, not an evaluation. */
+const TEMPO_BONUS = 10;
 
-/** Centipawns from white's perspective: positive favors white. */
-export function evaluate(chess: Chess): number {
+/**
+ * Centipawns from white's perspective: positive favors white.
+ *
+ * Reads chess.js's raw 0x88 array rather than `board()`: no per-call allocation
+ * of 64 cells, and no legal-move generation hiding inside the evaluation.
+ */
+export function evaluate(board: EngineBoard): number {
   let score = 0;
-  const board = chess.board();
-  const bishops = { w: 0, b: 0 };
+  let whiteBishops = 0;
+  let blackBishops = 0;
 
-  for (let rank = 0; rank < 8; rank++) {
-    for (let file = 0; file < 8; file++) {
-      const cell = board[rank][file];
-      if (!cell) continue;
-      const table = PST[cell.type];
-      const posRank = cell.color === "w" ? rank : 7 - rank;
-      const value = PIECE_VALUE[cell.type] + table[posRank][file];
-      score += cell.color === "w" ? value : -value;
-      if (cell.type === "b") bishops[cell.color]++;
+  for (let i = 0; i <= 119; i++) {
+    if (i & 0x88) {
+      i += 7; // skip the off-board half of the 0x88 layout
+      continue;
+    }
+    const cell = board._board[i];
+    if (!cell) continue;
+    const isWhite = cell.color === "w";
+    const rank = i >> 4;
+    const posRank = isWhite ? rank : 7 - rank;
+    const value = PIECE_VALUE[cell.type] + PST[cell.type][posRank][i & 15];
+    score += isWhite ? value : -value;
+    if (cell.type === "b") {
+      if (isWhite) whiteBishops++;
+      else blackBishops++;
     }
   }
 
-  if (bishops.w >= 2) score += BISHOP_PAIR_BONUS;
-  if (bishops.b >= 2) score -= BISHOP_PAIR_BONUS;
+  if (whiteBishops >= 2) score += BISHOP_PAIR_BONUS;
+  if (blackBishops >= 2) score -= BISHOP_PAIR_BONUS;
 
-  // Cheap mobility term: whoever is to move gets counted directly; the other
-  // side's move count is approximated by swapping turn on a throwaway clone
-  // is too costly to call every leaf, so mobility only nudges the side to move.
-  const mobility = chess.moves().length * MOBILITY_WEIGHT;
-  score += chess.turn() === "w" ? mobility : -mobility;
-
-  return score;
+  return score + (board.turn() === "w" ? TEMPO_BONUS : -TEMPO_BONUS);
 }
