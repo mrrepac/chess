@@ -189,6 +189,14 @@
 }
 
 .chess-bot-board {
+  /* Every square carries an aria-label ("d1, white, queen") for screen readers,
+     and Obsidian turns any aria-label into a hover tooltip — so sweeping the
+     mouse across the board popped a bubble over every square, and the gaps
+     between them popped "Chess board". This is Obsidian's own opt-out: its
+     tooltip handler skips an element whose computed --no-tooltip is "true".
+     Set on the board because custom properties inherit, which covers the
+     squares as well; the toolbar sits outside and keeps its tooltips. */
+  --no-tooltip: true;
   display: grid;
   grid-template-columns: repeat(8, 1fr);
   gap: 2px;

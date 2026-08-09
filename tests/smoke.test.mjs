@@ -23,6 +23,14 @@ export default async function run() {
   s.check("the drag preview is too",
     !/\bthis\.doc\.create(?:El|Div|Span)\(/.test(viewSource));
 
+  // Obsidian shows a hover tooltip for anything carrying an aria-label, and the
+  // board labels all 64 squares for screen readers. Its documented escape is a
+  // computed --no-tooltip of "true"; without it the board pops a bubble over
+  // every square the mouse crosses.
+  const styles = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+  s.check("the board opts out of Obsidian's aria-label tooltips",
+    /\.chess-bot-board\s*\{[^}]*--no-tooltip:\s*true/s.test(styles));
+
   const registered = [];
   const commands = [];
   let settingTabAdded = false;
