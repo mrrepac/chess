@@ -26,7 +26,7 @@ export class ChessSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     const difficultySetting = new Setting(containerEl)
-      .setName("Сложность бота")
+      .setName("Сложность новой партии")
       .setDesc(describeDifficulty(this.plugin.settings.difficulty));
     difficultySetting.addSlider(slider => slider
       .setLimits(1, 10, 1)
@@ -40,8 +40,8 @@ export class ChessSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Подстраивать сложность под результат")
       .setDesc("Уровень двигается на единицу, когда один и тот же результат повторяется подряд. "
-        + "Ничья и пат серию прерывают, но уровень не меняют. Отмена хода в законченной "
-        + "партии отменяет и её вклад в серию.")
+        + "Ничья и пат серию прерывают, но уровень не меняют. Просмотр прошлых позиций "
+        + "правой и левой кнопками мыши не изменяет результат партии.")
       .addToggle(toggle => toggle
         .setValue(this.plugin.settings.adaptiveDifficulty)
         .onChange(async (value) => {
@@ -80,6 +80,19 @@ export class ChessSettingTab extends PluginSettingTab {
         }));
 
     new Setting(containerEl)
+      .setName("Ориентация доски")
+      .setDesc("Какие фигуры находятся внизу. Применяется сразу и не меняет цвет игрока.")
+      .addDropdown(dropdown => dropdown
+        .addOption("player", "Со стороны игрока")
+        .addOption("white", "Белые снизу")
+        .addOption("black", "Чёрные снизу")
+        .setValue(this.plugin.settings.boardOrientation)
+        .onChange(async (value) => {
+          this.plugin.settings.boardOrientation = value as typeof this.plugin.settings.boardOrientation;
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(containerEl)
       .setName("Контроль времени")
       .setDesc("Сколько минут даётся вам на партию. Отсчёт начинается с вашего первого хода "
         + "и идёт только пока доска открыта.")
@@ -110,16 +123,6 @@ export class ChessSettingTab extends PluginSettingTab {
         .setValue(String(this.plugin.settings.incrementSeconds))
         .onChange(async (value) => {
           this.plugin.settings.incrementSeconds = Number(value);
-          await this.plugin.saveSettings();
-        }));
-
-    new Setting(containerEl)
-      .setName("Показывать оценку бота")
-      .setDesc("После хода бота выводит его собственную оценку позиции в пешках.")
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.showEvaluation)
-        .onChange(async (value) => {
-          this.plugin.settings.showEvaluation = value;
           await this.plugin.saveSettings();
         }));
 

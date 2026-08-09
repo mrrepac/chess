@@ -1,4 +1,5 @@
 import { bundle, load, suite } from "./harness.mjs";
+import { readFile } from "node:fs/promises";
 
 /** Runtime smoke test: does the plugin actually wire up without throwing,
  *  not just type-check and bundle cleanly. */
@@ -6,6 +7,9 @@ export default async function run() {
   const s = suite("smoke");
 
   const src = await bundle("src/main.ts");
+  const viewSource = await readFile(new URL("../src/view.ts", import.meta.url), "utf8");
+  s.check("the contextual action is cleared before its icon and label are rebuilt",
+    /actionBtn\.empty\(\);\s+setIcon\(actionBtn/.test(viewSource));
 
   const registered = [];
   const commands = [];
@@ -55,6 +59,7 @@ export default async function run() {
   s.check("loads default settings (difficulty 5)", plugin.settings.difficulty === 5);
   s.check("defaults to a ten-minute clock", plugin.settings.timeControlMinutes === 10);
   s.check("the bot's move arrow is on by default", plugin.settings.showMoveArrow === true);
+  s.check("the board follows the player by default", plugin.settings.boardOrientation === "player");
   s.check("creates a game controller with a starting position", () =>
     plugin.controller.chess.fen().startsWith("rnbqkbnr/pppppppp"));
 
@@ -94,13 +99,15 @@ export default async function run() {
   // played through applyHumanMove, so the game ends the way it does in play.
   const MATE_OR_STALEMATE = "7k/8/6K1/8/8/8/8/3Q4 w - - 0 1";
   const endGameAs = (controller, ending) => {
-    controller.newGame("w");
+    const nextDifficulty = controller.resultApplied?.to ?? controller.gameDifficulty;
+    controller.newGame("w", controller.clockMs, controller.incrementMs, nextDifficulty);
     controller.chess.load(MATE_OR_STALEMATE);
     controller.applyHumanMove("d1", ending === "win" ? "d8" : "d5");
   };
 
   const lose = (controller) => {
-    controller.newGame("w");
+    const nextDifficulty = controller.resultApplied?.to ?? controller.gameDifficulty;
+    controller.newGame("w", controller.clockMs, controller.incrementMs, nextDifficulty);
     controller.resign();
   };
 
@@ -186,6 +193,18 @@ export default async function run() {
 
   {
     const p = await bootWith({
+      difficulty: 5, adaptiveDifficulty: true, adaptiveThreshold: 3, playerColor: "w"
+    });
+    endGameAs(p.controller, "win");
+    await p.setDifficulty(8);
+    p.controller.undoHumanTurn();
+    s.check("undo does not revive a streak superseded by a manual level choice",
+      p.settings.difficulty === 8 && p.settings.resultStreak === 0
+      && p.controller.resultApplied === null);
+  }
+
+  {
+    const p = await bootWith({
       difficulty: 10, adaptiveDifficulty: true, adaptiveThreshold: 1, playerColor: "w"
     });
     endGameAs(p.controller, "win");
@@ -206,6 +225,19 @@ export default async function run() {
     s.check("with the setting off nothing is counted at all",
       p.settings.difficulty === 5 && p.settings.resultStreak === 0
       && p.controller.resultApplied === null);
+  }
+
+  {
+    const p = await bootWith({ difficulty: 4, adaptiveDifficulty: false, playerColor: "w" });
+    p.controller.newGame("w", p.timeControlMs, p.incrementMs, 4);
+    await p.setDifficulty(8);
+    p.controller.chess.load(MATE_OR_STALEMATE);
+    p.controller.applyHumanMove("d1", "d8");
+    s.check("changing the setting does not change the level of a live game",
+      () => p.controller.gameDifficulty === 4
+        && p.settings.difficulty === 8
+        && p.settings.levelStats[4]?.wins === 1
+        && p.settings.levelStats[8] === undefined);
   }
 
   {
@@ -230,7 +262,8 @@ export default async function run() {
     const counted = p.controller.resultApplied;
     s.check("a finished game loads already counted", counted !== null && counted.from === counted.to);
     p.controller.undoHumanTurn(); // the first notify this game gets
-    s.check("and reopening the vault does not re-apply its result", p.settings.difficulty === 5);
+    s.check("and reopening the vault does not re-apply its result",
+      p.settings.difficulty === 5 && p.settings.resultStreak === 0);
   }
 
   // --- the per-level tally ---------------------------------------------------

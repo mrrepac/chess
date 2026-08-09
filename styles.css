@@ -2,137 +2,190 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.45em;
-  padding: 1em;
+  gap: 0.35em;
+  padding: 0.8em;
   height: 100%;
   overflow: auto;
+  container-type: inline-size;
 }
 
-.chess-bot-toolbar {
-  display: flex;
-  flex-wrap: nowrap;
-  gap: 5px;
+.chess-bot-topbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
   align-items: center;
-  justify-content: center;
   width: 100%;
-  max-width: 560px;
-}
-
-.chess-bot-toolbar .chess-bot-icon-button {
-  width: 32px;
-  height: 32px;
-  min-width: 32px;
-  min-height: 32px;
-  padding: 6px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 7px;
-}
-
-.chess-bot-toolbar .chess-bot-icon-button svg {
-  width: 17px;
-  height: 17px;
-}
-
-.chess-bot-toolbar .chess-bot-difficulty-button,
-.chess-bot-toolbar .chess-bot-color-button {
-  width: 32px;
-  height: 32px;
-  min-width: 32px;
-  min-height: 32px;
-  padding: 0;
-  border-radius: 7px;
+  max-width: 520px;
+  min-height: 30px;
   font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  transition: color 160ms ease;
+}
+
+.chess-bot-status-group,
+.chess-bot-controls {
+  display: flex;
+  align-items: center;
+}
+
+.chess-bot-status-group {
+  min-width: 0;
+  gap: 5px;
+  overflow: hidden;
+}
+
+.chess-bot-status-dot {
+  --chess-bot-status-color: var(--text-muted);
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--chess-bot-status-color);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--chess-bot-status-color) 16%, transparent);
+  transition: background-color 160ms ease, box-shadow 160ms ease;
+}
+
+.chess-bot-status-dot.ready,
+.chess-bot-status-dot.result-win { --chess-bot-status-color: var(--text-success); }
+
+.chess-bot-status-dot.alert,
+.chess-bot-status-dot.result-loss { --chess-bot-status-color: var(--text-error); }
+
+.chess-bot-status-dot.review,
+.chess-bot-status-dot.result-draw { --chess-bot-status-color: var(--interactive-accent); }
+
+.chess-bot-status-dot.bot { animation: chess-bot-status-pulse 1.4s ease-in-out infinite; }
+
+.chess-bot-controls {
+  flex: none;
+  gap: 4px;
+}
+
+.chess-bot-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-weight: 600;
 }
 
-.chess-bot-toolbar .chess-bot-color-button {
+.chess-bot-last-move {
+  flex: none;
+  color: var(--text-muted);
+  font-family: var(--font-monospace);
+  font-size: 0.82em;
+  white-space: nowrap;
+}
+
+.chess-bot-icon-button,
+.chess-bot-difficulty-button,
+.chess-bot-retry-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  border-radius: 6px;
+  transition: width 160ms ease, color 160ms ease, background-color 160ms ease;
 }
 
-.chess-bot-color-dot {
-  width: 15px;
-  height: 15px;
-  box-sizing: border-box;
-  border: 2px solid currentColor;
-  border-radius: 50%;
+.chess-bot-retry-button {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 3px;
 }
 
-.chess-bot-color-dot.b { background: currentColor; }
-
-.chess-bot-color-dot.random {
-  background: linear-gradient(90deg, currentColor 50%, transparent 50%);
+.chess-bot-retry-button svg,
+.chess-bot-icon-button svg {
+  width: 14px;
+  height: 14px;
 }
 
-.chess-bot-toolbar .setting-item {
-  border: none;
-  padding: 0;
+.chess-bot-icon-button,
+.chess-bot-difficulty-button {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 4px;
 }
 
-/* Undo with nothing to take back, resigning an already finished game: the
-   button says so instead of swallowing the click. */
-.chess-bot-toolbar button:disabled {
+.chess-bot-difficulty-button {
+  width: auto;
+  padding-inline: 6px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.chess-bot-level-prefix { margin-right: 3px; }
+
+.chess-bot-icon-button.finished {
+  width: auto;
+  padding-inline: 7px;
+  gap: 4px;
+  color: var(--text-on-accent);
+  background: var(--interactive-accent);
+}
+
+.chess-bot-action-label { line-height: 1; }
+
+.chess-bot-clock,
+.chess-bot-score {
+  padding: 3px 4px;
+  white-space: nowrap;
+  transition: color 160ms ease, opacity 160ms ease;
+}
+
+.chess-bot-clock {
+  min-width: 38px;
+  text-align: right;
+  font-weight: 620;
+}
+
+.chess-bot-score {
+  min-width: 34px;
+  text-align: center;
+  font-weight: 650;
+}
+
+.chess-bot-score.advantage { color: var(--text-success); }
+
+.chess-bot-score.disadvantage { color: var(--text-error); }
+
+.chess-bot-controls button:disabled {
   opacity: 0.38;
   box-shadow: none;
   cursor: default;
 }
 
-.chess-bot-status {
-  min-height: 1.4em;
-  font-weight: 600;
-  text-align: center;
-}
-
-.chess-bot-game-info {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  min-height: 24px;
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
-.chess-bot-clock,
-.chess-bot-score,
-.chess-bot-eval {
-  padding: 3px 8px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 999px;
-  background: var(--background-secondary);
-  white-space: nowrap;
-}
-
-.chess-bot-score,
-.chess-bot-eval {
-  min-width: 30px;
-  padding-inline: 7px;
-  text-align: center;
-  font-weight: 650;
-}
-
-.chess-bot-eval { font-weight: 500; }
-
-.chess-bot-game-info .hidden { display: none; }
-
-.chess-bot-score.advantage,
-.chess-bot-eval.advantage { color: var(--text-success); }
-
-.chess-bot-score.disadvantage,
-.chess-bot-eval.disadvantage { color: var(--text-error); }
+.chess-bot-view .hidden { display: none; }
 
 .chess-bot-clock.low {
   color: var(--text-error);
-  border-color: color-mix(in srgb, var(--text-error) 45%, transparent);
+  animation: chess-bot-clock-pulse 1.1s ease-in-out infinite;
 }
 
 /* Before the first move the clock is deliberately standing still. */
 .chess-bot-clock.waiting {
   opacity: 0.55;
   font-style: italic;
+}
+
+@container (max-width: 350px) {
+  .chess-bot-topbar { gap: 4px; }
+  .chess-bot-status-group { gap: 3px; }
+  .chess-bot-controls { gap: 3px; }
+  .chess-bot-last-move { display: none; }
+  .chess-bot-level-prefix { display: none; }
+  .chess-bot-difficulty-button { width: 28px; padding-inline: 4px; }
+  .chess-bot-clock,
+  .chess-bot-score { padding-inline: 2px; }
+}
+
+@container (max-width: 285px) {
+  .chess-bot-action-label { display: none; }
+  .chess-bot-icon-button.finished { width: 28px; padding-inline: 4px; }
 }
 
 .chess-bot-board {
@@ -143,14 +196,14 @@
   position: relative;
   width: 100%;
   max-width: 520px;
-  padding: 3px;
+  padding: 2px;
   background: #354354;
   border: 1px solid rgba(172, 196, 218, 0.46);
-  border-radius: 5px;
+  border-radius: 8px;
   box-shadow:
-    0 12px 28px rgba(5, 10, 18, 0.35),
+    0 10px 24px rgba(5, 10, 18, 0.32),
     inset 0 1px 0 rgba(255, 255, 255, 0.16),
-    0 0 0 1px rgba(8, 15, 24, 0.55);
+    0 0 0 1px rgba(8, 15, 24, 0.48);
   user-select: none;
   /* Dragging a piece is a pointer gesture on the board, not a page scroll. */
   touch-action: none;
@@ -160,6 +213,9 @@
 .chess-bot-board.dragging .chess-bot-square {
   cursor: grabbing;
 }
+
+.chess-bot-board.reviewing .chess-bot-square { cursor: pointer; }
+.chess-bot-board.reviewing .chess-bot-square:hover .chess-bot-piece { transform: none; }
 
 .chess-bot-square {
   position: relative;
@@ -172,6 +228,26 @@
   border-radius: 3px;
   overflow: hidden;
 }
+
+.chess-bot-square:focus-visible {
+  outline: 3px solid var(--interactive-accent);
+  outline-offset: -3px;
+  z-index: 3;
+}
+
+.chess-bot-coordinate {
+  position: absolute;
+  z-index: 3;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: clamp(7px, 1.7vw, 10px);
+  font-weight: 700;
+  line-height: 1;
+  pointer-events: none;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.65);
+}
+
+.chess-bot-coordinate.file { right: 3px; bottom: 2px; }
+.chess-bot-coordinate.rank { left: 3px; top: 2px; }
 
 .chess-bot-square.light {
   background:
@@ -265,8 +341,20 @@
   animation: chess-bot-illegal-shake 340ms ease-out;
 }
 
+@keyframes chess-bot-status-pulse {
+  0%, 100% { opacity: 0.45; transform: scale(0.88); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes chess-bot-clock-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.58; }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .chess-bot-square.illegal .chess-bot-piece { animation: none; }
+  .chess-bot-square.illegal .chess-bot-piece,
+  .chess-bot-status-dot.bot,
+  .chess-bot-clock.low { animation: none; }
 }
 
 /* The bot's last move: which square the piece came from is not something two

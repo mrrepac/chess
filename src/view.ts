@@ -1,20 +1,19 @@
 import { ItemView, Menu, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
-import type { Move, PieceSymbol, Square } from "chess.js";
+import { Chess, type Move, type PieceSymbol, type Square } from "chess.js";
 import type ChessBotPlugin from "./main";
 import type { GameController } from "./game-controller";
 import {
   clampDifficulty, describeDifficulty, formatRecord, MAX_DIFFICULTY, MIN_DIFFICULTY
 } from "./types";
 import type { Difficulty, PlayerColor } from "./types";
-import { findKing, isLightSquare, legalMovesFrom, squareAt, statusText } from "./rules";
+import {
+  findKing, illegalMoveReason, isLightSquare, legalMovesFrom, squareAt, statusText
+} from "./rules";
 import { createPieceImage } from "./pieces";
 import { confirm } from "./confirm";
 import { ChessSounds } from "./sound";
 
 export const VIEW_TYPE_CHESS = "chess-bot-view";
-
-/** Anything at or beyond this is a forced mate rather than a material score. */
-const MATE_THRESHOLD = 90000;
 
 /** How long the "you cannot go there" flash lasts. Must match the animations
  *  on `.chess-bot-square.illegal` in styles.css. */
@@ -32,11 +31,17 @@ interface DragState {
 export class ChessView extends ItemView {
   private plugin: ChessBotPlugin;
   private controller: GameController;
+  private topbarEl: HTMLElement;
+  private statusDotEl: HTMLElement;
   private boardEl: HTMLElement;
   private statusEl: HTMLElement;
   private clockEl: HTMLElement;
   private scoreEl: HTMLElement;
-  private evalEl: HTMLElement;
+  private lastMoveEl: HTMLElement;
+  private retryBtn: HTMLButtonElement;
+  private reviewPly: number | null = null;
+  private viewedChess: Chess;
+  private viewedLastMove: Move | null = null;
   private selected: Square | null = null;
   private legalTargets = new Set<Square>();
   private flipped = false;
@@ -46,16 +51,18 @@ export class ChessView extends ItemView {
   private pressSquare: Square | null = null;
   private clockTimer: number | null = null;
   private boardResize: ResizeObserver | null = null;
-  /** Toolbar buttons mirror settings that the settings tab — and adaptive
-   *  difficulty — can change behind the board's back, so their labels are
-   *  refreshed from the settings rather than only when they are clicked.
-   *  The same function greys out the buttons the position has nothing for. */
+  private keyboardSquare: Square | null = null;
+  private transientHint: string | null = null;
+  private hintTimer: number | null = null;
+  private newGamePromptOpen = false;
+  /** The level and contextual action can change behind the view's back. */
   private syncToolbar: () => void = () => {};
 
   constructor(leaf: WorkspaceLeaf, plugin: ChessBotPlugin) {
     super(leaf);
     this.plugin = plugin;
     this.controller = plugin.controller;
+    this.viewedChess = this.controller.chess;
     this.sounds = new ChessSounds(() =>
       this.plugin.settings.soundEnabled ? this.plugin.settings.soundVolume / 100 : 0
     );
@@ -89,86 +96,64 @@ export class ChessView extends ItemView {
     const root = this.contentEl;
     root.empty();
     root.addClass("chess-bot-view");
+    root.removeEventListener("keydown", this.handleViewKeyDown);
+    root.addEventListener("keydown", this.handleViewKeyDown);
 
-    const toolbar = root.createDiv({ cls: "chess-bot-toolbar" });
+    this.topbarEl = root.createDiv({ cls: "chess-bot-topbar" });
+    const statusGroup = this.topbarEl.createDiv({ cls: "chess-bot-status-group" });
+    this.statusDotEl = statusGroup.createSpan({ cls: "chess-bot-status-dot" });
+    this.statusDotEl.setAttribute("aria-hidden", "true");
+    this.statusEl = statusGroup.createDiv({ cls: "chess-bot-status" });
+    this.statusEl.setAttribute("role", "status");
+    this.statusEl.setAttribute("aria-live", "polite");
+    this.lastMoveEl = statusGroup.createSpan({ cls: "chess-bot-last-move" });
+    this.retryBtn = statusGroup.createEl("button", { cls: "chess-bot-retry-button" });
+    setIcon(this.retryBtn, "refresh-cw");
+    setTooltip(this.retryBtn, "Повторить ход бота");
+    this.retryBtn.addEventListener("click", () => void this.maybeTriggerBot());
+
+    const controls = this.topbarEl.createDiv({ cls: "chess-bot-controls" });
+    this.clockEl = controls.createSpan({ cls: "chess-bot-clock" });
+    this.scoreEl = controls.createSpan({ cls: "chess-bot-score" });
+
     // Obsidian draws its own tooltip for anything carrying an aria-label, so an
     // element with both that and a `title` gets two of them, one over the other.
     // setTooltip is the one mechanism: it sets the aria-label and leaves the
     // native tooltip out of it.
     const iconButton = (icon: string, label: string): HTMLButtonElement => {
-      const button = toolbar.createEl("button", { cls: "chess-bot-icon-button" });
+      const button = controls.createEl("button", { cls: "chess-bot-icon-button" });
       setIcon(button, icon);
       setTooltip(button, label);
       return button;
     };
 
-    const newGameBtn = iconButton("plus", "Новая игра");
-    newGameBtn.addEventListener("click", () => this.startNewGame());
-
-    const undoBtn = iconButton("undo-2", "Отменить ход");
-    undoBtn.addEventListener("click", () => {
-      if (this.controller.undoHumanTurn()) {
-        this.selected = null;
-        this.legalTargets.clear();
-        this.sounds.play("undo");
-        void this.plugin.persistGame();
+    const actionBtn = iconButton("plus", "Новая партия");
+    actionBtn.addEventListener("click", () => {
+      if (this.reviewPly !== null) return;
+      if (!this.controller.isGameOver && this.controller.historyLength > 0) {
+        void this.resignWithConfirmation();
+      } else {
+        void this.startNewGame();
       }
     });
 
-    const flipBtn = iconButton("refresh-cw", "Перевернуть доску");
-    flipBtn.addEventListener("click", () => {
-      this.flipped = !this.flipped;
-      this.render();
-    });
-
-    const soundBtn = iconButton("volume-2", "Выключить звук");
-    const updateSoundLabel = () => {
-      const enabled = this.plugin.settings.soundEnabled;
-      setIcon(soundBtn, enabled ? "volume-2" : "volume-x");
-      setTooltip(soundBtn, enabled ? "Выключить звук" : "Включить звук");
-    };
-    soundBtn.addEventListener("click", () => {
-      this.plugin.settings.soundEnabled = !this.plugin.settings.soundEnabled;
-      updateSoundLabel();
-      if (this.plugin.settings.soundEnabled) this.sounds.play("start");
-      void this.plugin.saveSettings();
-    });
-
-    const resignBtn = iconButton("flag", "Сдаться");
-    resignBtn.addEventListener("click", () => void this.resignWithConfirmation());
-
-    const colorBtn = toolbar.createEl("button", { cls: "chess-bot-color-button" });
-    const updateColorLabel = () => {
-      const choice = this.plugin.settings.playerColor;
-      const labels = {
-        w: "Белые",
-        b: "Чёрные",
-        random: "Случайный цвет"
-      } as const;
-      colorBtn.empty();
-      colorBtn.createSpan({ cls: `chess-bot-color-dot ${choice}` });
-      setTooltip(colorBtn, `Цвет новой партии: ${labels[choice]}`);
-    };
-    colorBtn.addEventListener("click", () => {
-      const current = this.plugin.settings.playerColor;
-      this.plugin.settings.playerColor = current === "w" ? "b" : current === "b" ? "random" : "w";
-      updateColorLabel();
-      void this.plugin.saveSettings();
-    });
-
-    const difficultyBtn = toolbar.createEl("button", {
+    const difficultyBtn = controls.createEl("button", {
       cls: "chess-bot-difficulty-button",
       text: String(this.plugin.settings.difficulty)
     });
     const updateDifficultyLabel = () => {
-      const level = this.plugin.settings.difficulty;
-      difficultyBtn.setText(String(level));
+      const current = this.controller.gameDifficulty;
+      const next = this.plugin.settings.difficulty;
+      difficultyBtn.empty();
+      difficultyBtn.createSpan({ cls: "chess-bot-level-prefix", text: "Ур " });
+      difficultyBtn.createSpan({ text: current === next ? String(current) : `${current}→${next}` });
       // One line: the tooltip is a single run of text, so a newline in here
       // would come out as a space anyway.
       setTooltip(difficultyBtn, [
-        `Сложность бота: ${level} из ${MAX_DIFFICULTY}${this.plugin.describeStreak()}`,
-        this.plugin.describeLevelRecord(level),
-        "Колесо и правая кнопка — другие уровни"
+        `Уровень этой партии: ${current} из ${MAX_DIFFICULTY}`,
+        next === current ? "Изменение применится к следующей партии" : `Следующая партия: уровень ${next}`,
+        this.plugin.describeLevelRecord(current),
+        `Колесо и правая кнопка — выбрать следующий уровень${this.plugin.describeStreak()}`
       ].filter(Boolean).join(". "));
     };
     difficultyBtn.addEventListener("click", () => {
@@ -184,39 +169,39 @@ export class ChessView extends ItemView {
     }, { passive: false });
     difficultyBtn.addEventListener("contextmenu", (event) => {
       event.preventDefault();
-      // The pane-wide handler below turns right-click into "new game" once the
-      // game is over; picking a level must not also deal a fresh position.
       event.stopPropagation();
       this.showDifficultyMenu(event);
     });
 
     const updateButtonStates = () => {
-      undoBtn.disabled = !this.controller.canUndo;
-      setTooltip(undoBtn, undoBtn.disabled
-        ? "Отменить ход — отменять пока нечего"
-        : "Отменить ход");
-      resignBtn.disabled = this.controller.isGameOver;
-      setTooltip(resignBtn, resignBtn.disabled
-        ? "Сдаться — партия уже закончена"
-        : "Сдаться");
+      const canResign = !this.controller.isGameOver && this.controller.historyLength > 0;
+      const finished = this.controller.isGameOver;
+      actionBtn.empty();
+      setIcon(actionBtn, canResign ? "flag" : "plus");
+      actionBtn.toggleClass("finished", finished);
+      if (finished) actionBtn.createSpan({ cls: "chess-bot-action-label", text: "Новая" });
+      actionBtn.disabled = this.reviewPly !== null;
+      setTooltip(actionBtn, this.reviewPly !== null
+        ? "Сначала вернитесь к текущей позиции"
+        : canResign ? "Сдаться" : finished ? "Новая партия (Enter)" : "Новая партия");
     };
 
     this.syncToolbar = () => {
-      updateSoundLabel();
-      updateColorLabel();
       updateDifficultyLabel();
       updateButtonStates();
     };
     this.syncToolbar();
-
-    this.statusEl = root.createDiv({ cls: "chess-bot-status" });
-    const gameInfo = root.createDiv({ cls: "chess-bot-game-info" });
-    this.clockEl = gameInfo.createSpan({ cls: "chess-bot-clock" });
-    this.scoreEl = gameInfo.createSpan({ cls: "chess-bot-score" });
-    this.evalEl = gameInfo.createSpan({ cls: "chess-bot-eval" });
     this.boardEl = root.createDiv({ cls: "chess-bot-board" });
+    this.boardEl.setAttribute("role", "grid");
+    this.boardEl.setAttribute("aria-label", "Шахматная доска");
+    this.boardEl.setAttribute("aria-rowcount", "8");
+    this.boardEl.setAttribute("aria-colcount", "8");
     this.boardEl.addEventListener("pointerdown", this.handlePointerDown);
-    this.boardEl.addEventListener("contextmenu", event => event.preventDefault());
+    this.boardEl.addEventListener("keydown", this.handleBoardKeyDown);
+    this.boardEl.addEventListener("contextmenu", event => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
     // The move arrow is drawn in pixels off the squares it connects, so every
     // resize of the pane needs it drawn again. It also covers the first paint:
     // a board with no layout yet has nothing to measure, and this fires as soon
@@ -226,18 +211,10 @@ export class ChessView extends ItemView {
     this.boardResize = new win.ResizeObserver(() => this.drawBotMoveArrow());
     this.boardResize.observe(this.boardEl);
 
-    // Once the game is over there is nothing to lose by right-clicking, so the
-    // whole pane becomes a "deal again" button. Bubbles up from the board too.
-    root.addEventListener("contextmenu", (event) => {
-      if (!this.controller.isGameOver) return;
-      event.preventDefault();
-      this.startNewGame();
-    });
-
     this.clearAncestorWidthCaps();
     this.unsubscribe = this.controller.onChange(() => this.render());
-    this.flipped = this.controller.humanColor === "b";
-    this.controller.resumeHumanClock();
+    this.applyOrientation();
+    this.controller.openBoard();
     this.render();
     // Only the clock changes between repaints; everything else on that row is
     // driven by controller notifications, so it does not belong on a timer.
@@ -247,13 +224,34 @@ export class ChessView extends ItemView {
 
   /** Called by the plugin when a setting the board mirrors changed elsewhere. */
   refreshFromSettings(): void {
+    const wasFlipped = this.flipped;
+    this.applyOrientation();
     this.syncToolbar();
-    this.drawBotMoveArrow();
+    if (wasFlipped !== this.flipped) this.render();
+    else this.drawBotMoveArrow();
+  }
+
+  private applyOrientation(): void {
+    const orientation = this.plugin.settings.boardOrientation;
+    this.flipped = orientation === "black"
+      || (orientation === "player" && this.controller.humanColor === "b");
   }
 
   private stepDifficulty(step: 1 | -1): void {
     const next = clampDifficulty(this.plugin.settings.difficulty + step);
     if (next !== this.plugin.settings.difficulty) void this.plugin.setDifficulty(next);
+  }
+
+  private stepHistory(step: 1 | -1): void {
+    const total = this.controller.historyLength;
+    if (total === 0) return;
+    const current = this.reviewPly ?? total;
+    const target = Math.min(total, Math.max(0, current + step));
+    this.reviewPly = target === total ? null : target;
+    this.selected = null;
+    this.legalTargets.clear();
+    this.finishDrag();
+    this.render();
   }
 
   /** The whole ladder in one menu, each level with what it plays like and how
@@ -289,14 +287,17 @@ export class ChessView extends ItemView {
   }
 
   async onClose() {
+    this.contentEl.removeEventListener("keydown", this.handleViewKeyDown);
     this.finishDrag();
     this.sounds.close();
     this.boardResize?.disconnect();
     this.boardResize = null;
     if (this.clockTimer !== null) this.win.clearInterval(this.clockTimer);
     this.clockTimer = null;
+    if (this.hintTimer !== null) this.win.clearTimeout(this.hintTimer);
+    this.hintTimer = null;
     // The clock belongs to time spent at the board, not to wall time.
-    this.controller.pauseHumanClock();
+    this.controller.closeBoard();
     void this.plugin.persistGame();
     this.unsubscribe?.();
     this.unsubscribe = null;
@@ -310,7 +311,7 @@ export class ChessView extends ItemView {
   private handlePointerDown = (event: PointerEvent): void => {
     if (event.button === 2) {
       event.preventDefault();
-      this.cancelDrag();
+      this.stepHistory(-1);
       return;
     }
     if (event.button !== 0) return;
@@ -318,6 +319,12 @@ export class ChessView extends ItemView {
     const cell = (event.target as HTMLElement).closest<HTMLElement>(".chess-bot-square");
     const square = cell?.dataset.square as Square | undefined;
     if (!cell || !square || !this.boardEl.contains(cell)) return;
+    this.keyboardSquare = square;
+    if (this.reviewPly !== null) {
+      event.preventDefault();
+      this.stepHistory(1);
+      return;
+    }
     if (!this.controller.isHumanTurn) return;
 
     event.preventDefault();
@@ -346,6 +353,51 @@ export class ChessView extends ItemView {
     // Capture phase, so nothing downstream sees the click first.
     this.doc.addEventListener("pointerdown", this.handleDragAbort, true);
     this.doc.addEventListener("contextmenu", this.handleDragAbort, true);
+  };
+
+  /** Roving keyboard focus keeps the board to one Tab stop. Arrow keys move in
+   *  screen order, so they remain intuitive when the board is flipped. */
+  private handleBoardKeyDown = (event: KeyboardEvent): void => {
+    const cell = (event.target as HTMLElement).closest<HTMLElement>(".chess-bot-square");
+    if (!cell || !this.boardEl.contains(cell)) return;
+    const cells = Array.from(this.boardEl.querySelectorAll<HTMLElement>(".chess-bot-square"));
+    const index = cells.indexOf(cell);
+    let next = index;
+    if (event.key === "ArrowLeft" && index % 8 > 0) next--;
+    else if (event.key === "ArrowRight" && index % 8 < 7) next++;
+    else if (event.key === "ArrowUp" && index >= 8) next -= 8;
+    else if (event.key === "ArrowDown" && index < 56) next += 8;
+    else if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      const square = cell.dataset.square as Square | undefined;
+      if (square) void this.handleSquareClick(square);
+      return;
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      if (this.reviewPly !== null) this.reviewPly = null;
+      this.selected = null;
+      this.legalTargets.clear();
+      this.render();
+      return;
+    } else return;
+
+    event.preventDefault();
+    const destination = cells[next];
+    this.keyboardSquare = destination.dataset.square as Square;
+    cell.tabIndex = -1;
+    destination.tabIndex = 0;
+    destination.focus();
+  };
+
+  /** Once the result is on the board, Enter deals the next game. Keep native
+   *  button/input activation intact when focus is on an actual control. */
+  private handleViewKeyDown = (event: KeyboardEvent): void => {
+    if (event.key !== "Enter" || !this.controller.isGameOver) return;
+    const target = event.target as HTMLElement | null;
+    if (target?.closest("button, input, select, textarea")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void this.startNewGame();
   };
 
   /** Puts a dragged piece back and clears the move hints, without moving.
@@ -397,7 +449,10 @@ export class ChessView extends ItemView {
         this.render();
         // Dropping a piece back where it was picked up is a cancelled move, not
         // an attempt at an illegal one.
-        if (target && target !== drag?.from) this.flashIllegal(target);
+        if (target && target !== drag?.from) {
+          this.flashIllegal(target);
+          this.explainIllegalMove(drag?.from ?? null, target);
+        }
       }
       return;
     }
@@ -443,13 +498,38 @@ export class ChessView extends ItemView {
     this.boardEl?.querySelector(".drag-source")?.removeClass("drag-source");
   }
 
-  private startNewGame(): void {
+  private async startNewGame(): Promise<void> {
+    if (this.newGamePromptOpen) return;
+    if (!this.controller.isGameOver && this.controller.chess.history().length > 0) {
+      this.newGamePromptOpen = true;
+      let agreed: boolean;
+      try {
+        agreed = await confirm(
+          this.app,
+          "Начать новую партию?",
+          "Текущая незаконченная партия будет удалена и не попадёт в статистику.",
+          "Новая партия"
+        );
+      } finally {
+        this.newGamePromptOpen = false;
+      }
+      if (!agreed) return;
+    }
+    if (this.hintTimer !== null) this.win.clearTimeout(this.hintTimer);
+    this.hintTimer = null;
+    this.transientHint = null;
+    this.reviewPly = null;
     const pref = this.plugin.settings.playerColor;
     const humanColor: PlayerColor = pref === "random" ? (Math.random() < 0.5 ? "w" : "b") : pref;
     this.selected = null;
     this.legalTargets.clear();
-    this.flipped = humanColor === "b";
-    this.controller.newGame(humanColor, this.plugin.timeControlMs, this.plugin.incrementMs);
+    this.controller.newGame(
+      humanColor,
+      this.plugin.timeControlMs,
+      this.plugin.incrementMs,
+      this.plugin.settings.difficulty
+    );
+    this.applyOrientation();
     this.sounds.play("start");
     void this.plugin.persistGame();
     void this.maybeTriggerBot();
@@ -463,7 +543,7 @@ export class ChessView extends ItemView {
     const agreed = await confirm(
       this.app,
       "Сдаться?",
-      `Партия закончится поражением, отменить это можно только кнопкой «Отменить ход».${cost}`,
+      `Партия закончится поражением.${cost}`,
       "Сдаться"
     );
     // The clock kept running while the box was open, so the game can have
@@ -476,7 +556,7 @@ export class ChessView extends ItemView {
   private async maybeTriggerBot(): Promise<void> {
     if (this.controller.isGameOver) return;
     if (this.controller.chess.turn() === this.controller.humanColor) return;
-    const move = await this.controller.requestBotMove(this.plugin.settings.difficulty);
+    const move = await this.controller.requestBotMove();
     if (move) {
       this.playMoveSound(move);
       void this.plugin.persistGame();
@@ -484,6 +564,7 @@ export class ChessView extends ItemView {
   }
 
   private async handleSquareClick(square: Square): Promise<void> {
+    if (this.reviewPly !== null) return;
     if (!this.controller.isHumanTurn) return;
     const piece = this.controller.chess.get(square);
 
@@ -530,7 +611,12 @@ export class ChessView extends ItemView {
       this.legalTargets = new Set(moves.map(m => m.to as Square));
       this.render();
       // A piece with nowhere to go looks exactly like one the click missed.
-      if (moves.length === 0) this.flashIllegal(square, this.checkedKingSquare(square));
+      if (moves.length === 0) {
+        this.flashIllegal(square, this.checkedKingSquare(square));
+        this.showHint(this.controller.chess.isCheck()
+          ? "Этой фигурой нельзя защититься от шаха."
+          : "У этой фигуры сейчас нет допустимых ходов.");
+      }
       return;
     }
 
@@ -539,6 +625,7 @@ export class ChessView extends ItemView {
     // next click can aim again — the same thing a dropped drag does.
     if (this.selected) {
       this.flashIllegal(square);
+      this.explainIllegalMove(this.selected, square);
       return;
     }
 
@@ -553,6 +640,59 @@ export class ChessView extends ItemView {
     if (chess.isCheckmate()) outcome = chess.turn() === humanColor ? "loss" : "win";
     else if (chess.isGameOver()) outcome = "draw";
     this.sounds.playMove(move, chess.isCheck(), outcome);
+  }
+
+  private defaultKeyboardSquare(): Square {
+    return this.flipped ? "h1" : "a8";
+  }
+
+  private squareLabel(
+    square: Square,
+    piece: { type: PieceSymbol; color: "w" | "b" } | undefined
+  ): string {
+    const pieceNames: Record<PieceSymbol, string> = {
+      p: "пешка", n: "конь", b: "слон", r: "ладья", q: "ферзь", k: "король"
+    };
+    const parts: string[] = [square];
+    if (piece) parts.push(`${piece.color === "w" ? "белые" : "чёрные"}, ${pieceNames[piece.type]}`);
+    else parts.push("пустое поле");
+    if (square === this.selected) parts.push("выбрано");
+    else if (this.legalTargets.has(square)) parts.push(piece ? "доступно для взятия" : "доступный ход");
+    return parts.join(", ");
+  }
+
+  private updateLastMoveLabel(): void {
+    const move = this.viewedLastMove;
+    if (!move) {
+      this.lastMoveEl.addClass("hidden");
+      this.lastMoveEl.setText("");
+      return;
+    }
+    const moveNumber = Number(move.before.split(" ")[5]) || this.viewedChess.moveNumber();
+    this.lastMoveEl.setText(move.color === "w" ? `${moveNumber}.${move.san}` : `${moveNumber}…${move.san}`);
+    this.lastMoveEl.removeClass("hidden");
+    setTooltip(this.lastMoveEl, "Последний ход");
+  }
+
+  private explainIllegalMove(from: Square | null, to: Square): void {
+    if (!from) return;
+    this.showHint(illegalMoveReason(this.controller.chess, from, to));
+  }
+
+  private showHint(text: string): void {
+    this.transientHint = text;
+    this.statusEl.setText(text);
+    if (this.hintTimer !== null) this.win.clearTimeout(this.hintTimer);
+    this.hintTimer = this.win.setTimeout(() => {
+      this.hintTimer = null;
+      this.transientHint = null;
+      this.statusEl.setText(this.currentStatusText(
+        this.controller.chess,
+        this.controller.humanColor,
+        this.controller.thinking,
+        this.controller.resigned
+      ));
+    }, 1800);
   }
 
   /** A small overlay with the four promotion choices; resolves to undefined if dismissed. */
@@ -591,13 +731,46 @@ export class ChessView extends ItemView {
   }
 
   private render(): void {
-    const { chess, humanColor, thinking, resigned } = this.controller;
-    this.statusEl.setText(this.currentStatusText(chess, humanColor, thinking, resigned));
+    const { humanColor, thinking, resigned } = this.controller;
+    const total = this.controller.historyLength;
+    if (this.reviewPly !== null && this.reviewPly >= total) this.reviewPly = null;
+    if (this.reviewPly === null) {
+      this.viewedChess = this.controller.chess;
+      this.viewedLastMove = this.controller.lastMove;
+    } else {
+      const viewed = this.controller.positionAtPly(this.reviewPly);
+      this.viewedChess = viewed.chess;
+      this.viewedLastMove = viewed.lastMove;
+    }
+    const chess = this.viewedChess;
+    this.boardEl.toggleClass("reviewing", this.reviewPly !== null);
+    this.boardEl.setAttribute("aria-label", this.reviewPly === null
+      ? "Шахматная доска"
+      : `Просмотр партии, полуход ${this.reviewPly} из ${total}`);
+    const restoreFocus = this.boardEl?.contains(this.doc.activeElement) ?? false;
+    const status = this.reviewPly === null
+      ? this.currentStatusText(this.controller.chess, humanColor, thinking, resigned)
+      : `Просмотр: ${this.reviewPly} из ${total} · ПКМ назад, ЛКМ вперёд`;
+    this.statusEl.setText(this.transientHint ?? status);
+    const outcome = this.controller.outcome;
+    const tone = this.reviewPly !== null
+      ? "review"
+      : this.controller.engineError
+        ? "alert"
+        : outcome
+          ? `result-${outcome}`
+          : this.controller.chess.isCheck() && this.controller.isHumanTurn
+            ? "alert"
+            : this.controller.isHumanTurn ? "ready" : "bot";
+    this.statusDotEl.className = `chess-bot-status-dot ${tone}`;
+    this.topbarEl.toggleClass("finished", outcome !== null);
+    this.retryBtn.toggleClass("hidden", this.reviewPly !== null || !this.controller.engineError);
+    this.updateLastMoveLabel();
     this.syncToolbar();
     this.updateGameInfo();
 
     this.boardEl.empty();
-    const last = this.controller.lastMove;
+    const last = this.viewedLastMove;
     const kingInCheck = chess.isCheck() ? findKing(chess, chess.turn()) : null;
 
     for (let r = 0; r < 8; r++) {
@@ -608,12 +781,20 @@ export class ChessView extends ItemView {
 
         const cellEl = this.boardEl.createDiv({ cls: "chess-bot-square" });
         cellEl.dataset.square = square;
+        cellEl.setAttribute("role", "gridcell");
+        cellEl.setAttribute("aria-rowindex", String(r + 1));
+        cellEl.setAttribute("aria-colindex", String(f + 1));
+        cellEl.setAttribute("aria-selected", square === this.selected ? "true" : "false");
+        cellEl.setAttribute("aria-disabled",
+          this.reviewPly === null && this.controller.isHumanTurn ? "false" : "true");
+        cellEl.tabIndex = square === (this.keyboardSquare ?? this.defaultKeyboardSquare()) ? 0 : -1;
         cellEl.addClass(isLightSquare(file, rank) ? "light" : "dark");
         if (square === this.selected) cellEl.addClass("selected");
         if (last && (square === last.from || square === last.to)) cellEl.addClass("last-move");
         if (square === kingInCheck) cellEl.addClass("in-check");
 
         const piece = chess.get(square);
+        cellEl.setAttribute("aria-label", this.squareLabel(square, piece));
         if (this.legalTargets.has(square)) {
           cellEl.addClass(piece ? "legal-capture" : "legal-target");
         }
@@ -621,10 +802,19 @@ export class ChessView extends ItemView {
           const figure = cellEl.createSpan({ cls: "chess-bot-piece" });
           figure.appendChild(createPieceImage(piece.type, piece.color, this.doc));
         }
+        // Coordinates live inside edge cells, so they cost no board space.
+        if (r === 7) cellEl.createSpan({ cls: "chess-bot-coordinate file", text: square[0] });
+        if (f === 0) cellEl.createSpan({ cls: "chess-bot-coordinate rank", text: square[1] });
       }
     }
 
     this.drawBotMoveArrow();
+    if (restoreFocus) {
+      const square = this.keyboardSquare ?? this.defaultKeyboardSquare();
+      this.win.setTimeout(() => {
+        this.boardEl.querySelector<HTMLElement>(`[data-square="${square}"]`)?.focus();
+      }, 0);
+    }
   }
 
   /**
@@ -646,7 +836,7 @@ export class ChessView extends ItemView {
     this.boardEl.querySelector(".chess-bot-move-arrow")?.remove();
     if (!this.plugin.settings.showMoveArrow) return;
 
-    const move = this.controller.lastMove;
+    const move = this.viewedLastMove;
     if (!move || move.color === this.controller.humanColor) return;
 
     const fromEl = this.boardEl.querySelector<HTMLElement>(`[data-square="${move.from}"]`);
@@ -729,23 +919,28 @@ export class ChessView extends ItemView {
     chess: GameController["chess"], humanColor: PlayerColor, thinking: boolean, resigned: boolean
   ): string {
     if (this.controller.engineError) return "Движок не запустился — бот не может сходить.";
-    const base = this.controller.timedOut
-      ? "Время вышло — вы проиграли."
-      : statusText(chess, humanColor, thinking, resigned);
-    return this.controller.isGameOver ? `${base} Правая кнопка — новая партия.` : base;
+    if (this.controller.timedOut) return "Поражение · время вышло";
+    if (resigned) return "Поражение · сдача";
+    if (chess.isCheckmate()) return chess.turn() === humanColor ? "Поражение · мат" : "Победа · мат";
+    if (chess.isStalemate()) return "Ничья · пат";
+    if (chess.isThreefoldRepetition()) return "Ничья · повторение";
+    if (chess.isInsufficientMaterial()) return "Ничья · мало материала";
+    if (chess.isDraw()) return "Ничья";
+    return statusText(chess, humanColor, thinking, resigned);
   }
 
   private updateClock(): void {
     const clockEnabled = this.controller.clockEnabled;
-    this.clockEl.toggleClass("hidden", !clockEnabled);
-    if (!clockEnabled) return;
+    const show = clockEnabled && this.reviewPly === null;
+    this.clockEl.toggleClass("hidden", !show);
+    if (!show) return;
 
     const remaining = this.controller.remainingHumanTimeMs;
     const totalSeconds = Math.max(0, Math.ceil(remaining / 1000));
     const minutes = Math.floor(totalSeconds / 60);
     const seconds = String(totalSeconds % 60).padStart(2, "0");
     const increment = this.controller.incrementMs / 1000;
-    this.clockEl.setText(`⏱ ${minutes}:${seconds}${increment > 0 ? ` +${increment}` : ""}`);
+    this.clockEl.setText(`${minutes}:${seconds}`);
     this.clockEl.toggleClass("low", remaining > 0 && remaining <= 60_000);
 
     // A clock that visibly sits still needs to say why, or it reads as broken.
@@ -767,45 +962,14 @@ export class ChessView extends ItemView {
 
     const human = this.controller.humanColor;
     const opponent = human === "w" ? "b" : "w";
-    const { [human]: humanPoints, [opponent]: botPoints } = this.materialPoints();
+    const { [human]: humanPoints, [opponent]: botPoints } = this.materialPoints(this.viewedChess);
     const balance = humanPoints - botPoints;
-    this.scoreEl.setText(balance > 0 ? `+${balance}` : String(balance).replace("-", "−"));
+    const material = balance > 0 ? `+${balance}` : String(balance).replace("-", "−");
+    this.scoreEl.setText(balance === 0 ? "Ровно" : material);
     setTooltip(this.scoreEl, `Материал на доске: вы ${humanPoints} — ${botPoints} бот`);
     this.scoreEl.toggleClass("advantage", balance > 0);
     this.scoreEl.toggleClass("disadvantage", balance < 0);
 
-    this.updateEvaluation();
-  }
-
-  private updateEvaluation(): void {
-    const last = this.controller.lastEval;
-    const book = this.controller.lastMoveFromBook;
-    const show = this.plugin.settings.showEvaluation && (last !== null || book);
-    this.evalEl.toggleClass("hidden", !show);
-    if (!show) return;
-
-    if (book || !last) {
-      // A book move was not searched, so showing "0.0" would be a lie about a
-      // position the bot never evaluated.
-      this.evalEl.setText("книга");
-      setTooltip(this.evalEl, "Ход из дебютной книги — бот его не считал");
-      this.evalEl.removeClass("advantage");
-      this.evalEl.removeClass("disadvantage");
-      return;
-    }
-
-    // The engine scores from white's point of view; flip it so "+" always
-    // means the person playing is better off.
-    const fromHuman = this.controller.humanColor === "w" ? last.cp : -last.cp;
-    if (Math.abs(fromHuman) >= MATE_THRESHOLD) {
-      this.evalEl.setText(fromHuman > 0 ? "мат" : "−мат");
-    } else {
-      const pawns = fromHuman / 100;
-      this.evalEl.setText(`${pawns > 0 ? "+" : pawns < 0 ? "−" : ""}${Math.abs(pawns).toFixed(1)}`);
-    }
-    setTooltip(this.evalEl, `Оценка бота после его хода, глубина ${last.depth}`);
-    this.evalEl.toggleClass("advantage", fromHuman > 0);
-    this.evalEl.toggleClass("disadvantage", fromHuman < 0);
   }
 
   /**
@@ -816,10 +980,10 @@ export class ChessView extends ItemView {
    * quietly ignored promotions: a bot that queened a pawn left the balance
    * showing whatever it was before, so the pill said "even" in a lost position.
    */
-  private materialPoints(): Record<"w" | "b", number> {
+  private materialPoints(chess: Chess): Record<"w" | "b", number> {
     const values: Record<PieceSymbol, number> = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
     const points: Record<"w" | "b", number> = { w: 0, b: 0 };
-    for (const row of this.controller.chess.board()) {
+    for (const row of chess.board()) {
       for (const cell of row) {
         if (cell) points[cell.color] += values[cell.type];
       }

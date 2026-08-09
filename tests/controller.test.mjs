@@ -88,6 +88,19 @@ export default async function run() {
     return stillPaused && afterPause <= 55_000 && controller.humanClockStartedAt !== null;
   });
 
+  s.check("closing one of two boards keeps the shared clock running", () => {
+    const controller = new GameController();
+    controller.newGame("w");
+    controller.applyHumanMove("e2", "e4");
+    controller.chess.move("e5");
+    controller.openBoard();
+    controller.openBoard();
+    controller.closeBoard();
+    const stillRunning = controller.humanClockStartedAt !== null;
+    controller.closeBoard();
+    return stillRunning && controller.humanClockStartedAt === null;
+  });
+
   // --- the clock starts with the first move, not with the game --------------
   s.check("a fresh game does not start the clock", () => {
     const controller = new GameController();
@@ -205,6 +218,14 @@ export default async function run() {
     return restored.incrementMs === 3_000;
   });
 
+  s.check("the game keeps its starting difficulty through serialization", () => {
+    const original = new GameController();
+    original.newGame("w", 300_000, 0, 8);
+    const restored = new GameController();
+    restored.restore(original.serialize(), 2);
+    return original.serialize().difficulty === 8 && restored.gameDifficulty === 8;
+  });
+
   // --- a save a person can break by hand ------------------------------------
   s.check("a corrupt FEN falls back to a fresh game instead of throwing", () => {
     const controller = new GameController();
@@ -232,6 +253,18 @@ export default async function run() {
     controller.chess.move("Nc6");
     controller.undoHumanTurn();
     return controller.lastMove?.san === "e5";
+  });
+
+  s.check("history browsing never changes the live game", () => {
+    const controller = new GameController();
+    controller.newGame("w");
+    for (const san of ["e4", "e5", "Nf3", "Nc6"]) controller.chess.move(san);
+    const liveFen = controller.chess.fen();
+    const viewed = controller.positionAtPly(2);
+    return viewed.chess.history().join(" ") === "e4 e5"
+      && viewed.lastMove?.san === "e5"
+      && controller.chess.fen() === liveFen
+      && controller.chess.history().join(" ") === "e4 e5 Nf3 Nc6";
   });
 
   // --- what the undo button is allowed to say about itself ------------------
@@ -342,7 +375,7 @@ export default async function run() {
   {
     const controller = new GameController();
     controller.newGame("b");
-    const pending = controller.requestBotMove(1);
+    const pending = controller.requestBotMove();
     const worker = workers.at(-1);
 
     controller.newGame("w");
@@ -357,7 +390,7 @@ export default async function run() {
   {
     const controller = new GameController();
     controller.newGame("b");
-    const pending = controller.requestBotMove(1);
+    const pending = controller.requestBotMove();
     const worker = workers.at(-1);
     worker.onmessage({
       data: { id: worker.request.id + 1, ok: true, from: "e2", to: "e4", evalCp: 0, depthReached: 1 }
@@ -369,17 +402,22 @@ export default async function run() {
 
   {
     const controller = new GameController();
-    controller.newGame("b");
-    const pending = controller.requestBotMove(1);
+    controller.newGame("b", controller.clockMs, controller.incrementMs, 3);
+    const pending = controller.requestBotMove();
     const worker = workers.at(-1);
     s.check("the bot request carries the game history for repetition detection",
       Array.isArray(worker.request.sanHistory));
+    s.check("the bot request uses the level fixed for this game",
+      worker.request.profile.depth === 2 && worker.request.profile.timeBudgetMs === 400);
     worker.onmessage({
       data: { id: worker.request.id, ok: true, from: "e2", to: "e4", evalCp: 42, depthReached: 3 }
     });
     await pending;
     s.check("the engine's evaluation of its move is kept for display",
       controller.lastEval?.cp === 42 && controller.lastEval?.depth === 3);
+    controller.applyHumanMove("e7", "e5");
+    s.check("a human move clears the previous engine evaluation",
+      controller.lastEval === null && controller.lastMoveFromBook === false);
   }
 
   {
@@ -388,7 +426,7 @@ export default async function run() {
     workerConstructorThrows = true;
     const controller = new GameController();
     controller.newGame("b");
-    const result = await controller.requestBotMove(1);
+    const result = await controller.requestBotMove();
     workerConstructorThrows = false;
     s.check("a worker that cannot start reports instead of hanging",
       result === null && !controller.thinking && typeof controller.engineError === "string");

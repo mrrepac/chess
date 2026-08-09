@@ -20,10 +20,13 @@ export default class ChessBotPlugin extends Plugin {
     await this.loadSettings();
 
     this.controller = new GameController();
-    if (this.settings.savedGame) this.controller.restore(this.settings.savedGame);
+    if (this.settings.savedGame) this.controller.restore(this.settings.savedGame, this.settings.difficulty);
     else {
       this.controller.newGame(
-        this.settings.playerColor === "b" ? "b" : "w", this.timeControlMs, this.incrementMs
+        this.settings.playerColor === "b" ? "b" : "w",
+        this.timeControlMs,
+        this.incrementMs,
+        this.settings.difficulty
       );
     }
     this.controller.onChange(() => this.onGameChanged());
@@ -64,6 +67,9 @@ export default class ChessBotPlugin extends Plugin {
   async setDifficulty(level: Difficulty): Promise<void> {
     this.settings.difficulty = clampDifficulty(level);
     this.settings.resultStreak = 0;
+    // The explicit choice now owns both values. If the just-finished game is
+    // undone later, its older adaptive snapshot must not overwrite them.
+    if (this.controller.resultApplied) this.controller.resultApplied.superseded = true;
     await this.saveSettings();
   }
 
@@ -116,7 +122,7 @@ export default class ChessBotPlugin extends Plugin {
     const outcome = this.controller.outcome;
     if (!outcome) return false; // e.g. the engine failed to start: not a result
 
-    const level = this.settings.difficulty;
+    const level = this.controller.gameDifficulty;
     this.adjustLevelRecord(level, outcome, 1);
     this.controller.statsRecorded = { level, outcome };
     return true;
@@ -150,6 +156,10 @@ export default class ChessBotPlugin extends Plugin {
 
     if (!this.controller.isGameOver) {
       if (!applied) return false;
+      if (applied.superseded) {
+        this.controller.resultApplied = null;
+        return true;
+      }
       // Undo turned a finished game back into a live one. Put the level back
       // only if it is still where this result left it; the streak always.
       if (applied.to !== applied.from && this.settings.difficulty === applied.to) {
@@ -164,9 +174,16 @@ export default class ChessBotPlugin extends Plugin {
     const outcome = this.controller.outcome;
     if (!outcome) return false; // e.g. the engine failed to start: not a result
 
-    const from = this.settings.difficulty;
+    const from = this.controller.gameDifficulty;
     const streakBefore = this.settings.resultStreak;
     const threshold = this.settings.adaptiveThreshold;
+
+    // A level chosen while this game was in progress is explicitly for the
+    // next game. Keep that newer choice and its reset streak intact.
+    if (this.settings.difficulty !== from) {
+      this.controller.resultApplied = { from, to: from, streakBefore, superseded: true };
+      return true;
+    }
 
     let streak: number;
     if (outcome === "win") streak = streakBefore > 0 ? streakBefore + 1 : 1;
@@ -224,7 +241,10 @@ export default class ChessBotPlugin extends Plugin {
    * refusing to move, with the status line stuck on "Ход бота".
    */
   async loadSettings() {
-    const raw = (await this.loadData()) as Partial<ChessBotSettings> | null;
+    const raw = (await this.loadData()) as (Partial<ChessBotSettings> & { showEvaluation?: unknown }) | null;
+    // Removed UI preference from older versions; do not keep writing a dead
+    // setting back to data.json forever.
+    if (raw) delete raw.showEvaluation;
     this.settings = { ...DEFAULT_SETTINGS, ...(raw ?? {}) };
     this.settings.difficulty = clampDifficulty(this.settings.difficulty);
 
@@ -252,6 +272,9 @@ export default class ChessBotPlugin extends Plugin {
 
     if (!["w", "b", "random"].includes(this.settings.playerColor)) {
       this.settings.playerColor = DEFAULT_SETTINGS.playerColor;
+    }
+    if (!["player", "white", "black"].includes(this.settings.boardOrientation)) {
+      this.settings.boardOrientation = DEFAULT_SETTINGS.boardOrientation;
     }
   }
 

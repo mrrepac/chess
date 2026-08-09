@@ -99,13 +99,13 @@ function checkDeadline(ctx: SearchContext): void {
 /**
  * A position that repeats, or that trips the fifty-move counter, is a draw and
  * must score 0 — otherwise the bot happily shuffles in a won game and never
- * sees a perpetual as the escape it is when losing. Two occurrences are enough
- * inside the tree: reaching the same position again means the side to move can
- * force the third one.
+ * sees a perpetual as the escape it is when losing. chess.js includes the
+ * current position in this count, so only the third occurrence is a rule draw;
+ * the opponent can still deviate after the second.
  */
 function isDrawByRule(ctx: SearchContext): boolean {
   if (ctx.board._halfMoves >= 100) return true;
-  return (ctx.repetitions.get(ctx.board._hash) ?? 0) >= 2;
+  return (ctx.repetitions.get(ctx.board._hash) ?? 0) >= 3;
 }
 
 function makeMove(ctx: SearchContext, move: InternalMove): void {

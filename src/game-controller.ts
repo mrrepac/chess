@@ -1,5 +1,5 @@
 import { Chess, type Move, type PieceSymbol, type Square } from "chess.js";
-import { DIFFICULTY_PROFILES } from "./types";
+import { clampDifficulty, DIFFICULTY_PROFILES } from "./types";
 import type {
   AppliedResult, Difficulty, GameOutcome, MoveRequest, PlayerColor, RecordedResult,
   SavedGame, WorkerResponse
@@ -30,7 +30,9 @@ const UNDO_AFTER_TIMEOUT_MS = 30 * 1000;
 /** Marks a game whose result must not move the difficulty: it was already over
  *  when this save was written, so there is nothing to apply and nothing to take
  *  back. `from === to` is the "already accounted for" shape (see AppliedResult). */
-const RESULT_ALREADY_COUNTED: AppliedResult = { from: 0, to: 0, streakBefore: 0 };
+const RESULT_ALREADY_COUNTED: AppliedResult = {
+  from: 0, to: 0, streakBefore: 0, superseded: true
+};
 
 /** The same idea for the per-level tally: level 0 is no level, so undoing this
  *  game takes nothing back out of the counters. */
@@ -43,6 +45,8 @@ const RESULT_OUTSIDE_STATS: RecordedResult = { level: 0, outcome: "draw" };
 export class GameController {
   chess = new Chess();
   humanColor: PlayerColor = "w";
+  /** Fixed for the lifetime of this game; settings only choose the next one. */
+  gameDifficulty: Difficulty = 5;
   thinking = false;
   resigned = false;
   /** 0 disables the clock entirely. */
@@ -73,6 +77,9 @@ export class GameController {
   private activeWorker: Worker | null = null;
   private cancelActiveRequest: (() => void) | null = null;
   private searchGeneration = 0;
+  /** Several Obsidian leaves can show the shared controller at once. The clock
+   *  pauses only when the last of those boards closes. */
+  private openBoardCount = 0;
 
   get clockEnabled(): boolean {
     return this.clockMs > 0;
@@ -98,10 +105,16 @@ export class GameController {
     this.thinking = false;
   }
 
-  newGame(humanColor: PlayerColor, clockMs = this.clockMs, incrementMs = this.incrementMs): void {
+  newGame(
+    humanColor: PlayerColor,
+    clockMs = this.clockMs,
+    incrementMs = this.incrementMs,
+    difficulty: Difficulty = this.gameDifficulty
+  ): void {
     this.abortBotSearch();
     this.chess = new Chess();
     this.humanColor = humanColor;
+    this.gameDifficulty = clampDifficulty(difficulty);
     this.resigned = false;
     this.clockMs = clockMs;
     this.incrementMs = incrementMs;
@@ -122,7 +135,7 @@ export class GameController {
   /** Rebuilds a saved game. Returns false if the save was unusable and a fresh
    *  game had to be started instead — a hand-edited or truncated data.json used
    *  to throw out of here and take the whole plugin's onload down with it. */
-  restore(saved: SavedGame): boolean {
+  restore(saved: SavedGame, fallbackDifficulty: Difficulty = this.gameDifficulty): boolean {
     this.abortBotSearch();
 
     // Loading a FEN alone discards chess.js history. Prefer replaying SAN from
@@ -149,7 +162,8 @@ export class GameController {
         this.newGame(
           saved.playerColor === "b" ? "b" : "w",
           saved.clockMs ?? this.clockMs,
-          saved.incrementMs ?? this.incrementMs
+          saved.incrementMs ?? this.incrementMs,
+          clampDifficulty(saved.difficulty ?? fallbackDifficulty)
         );
         return false;
       }
@@ -157,6 +171,7 @@ export class GameController {
     this.chess = restored;
     this.lastMove = replayedLast;
     this.humanColor = saved.playerColor === "b" ? "b" : "w";
+    this.gameDifficulty = clampDifficulty(saved.difficulty ?? fallbackDifficulty);
     this.resigned = saved.resigned ?? false;
     this.timedOut = saved.timedOut ?? false;
     this.engineError = null;
@@ -182,6 +197,7 @@ export class GameController {
       fen: this.chess.fen(),
       sanHistory: this.chess.history(),
       playerColor: this.humanColor,
+      difficulty: this.gameDifficulty,
       resigned: this.resigned,
       clockMs: this.clockMs,
       incrementMs: this.incrementMs,
@@ -230,6 +246,22 @@ export class GameController {
     return !this.isGameOver && !this.thinking && this.chess.turn() === this.humanColor;
   }
 
+  get historyLength(): number {
+    return this.chess.history().length;
+  }
+
+  /** Replays a prefix of the real game for a read-only history view. The live
+   *  Chess instance is never touched, so browsing cannot change the result,
+   *  clock, statistics or the position play resumes from. */
+  positionAtPly(ply: number): { chess: Chess; lastMove: Move | null } {
+    const history = this.chess.history();
+    const end = Math.min(history.length, Math.max(0, Math.trunc(ply)));
+    const replay = new Chess();
+    let lastMove: Move | null = null;
+    for (let i = 0; i < end; i++) lastMove = replay.move(history[i]);
+    return { chess: replay, lastMove };
+  }
+
   /** Whether there is a played move for undo to take back. If it is already the
    *  human's turn the latest move was the bot's, so a second ply must exist or
    *  there is no human move under it (e.g. the bot's opening move against black). */
@@ -271,6 +303,10 @@ export class GameController {
       return null; // illegal move
     }
     this.lastMove = move;
+    // The previous engine score describes the position before this move. Do
+    // not show it while the bot thinks — or forever if this move ends the game.
+    this.lastEval = null;
+    this.lastMoveFromBook = false;
     this.pauseHumanClock();
     // Fischer increment, credited once the move is on the board — the order a
     // real clock does it in.
@@ -312,9 +348,9 @@ export class GameController {
     return true;
   }
 
-  async requestBotMove(difficulty: Difficulty): Promise<Move | null> {
+  async requestBotMove(): Promise<Move | null> {
     if (this.isGameOver || this.thinking || this.chess.turn() === this.humanColor) return null;
-    const profile = DIFFICULTY_PROFILES[difficulty];
+    const profile = DIFFICULTY_PROFILES[this.gameDifficulty];
     if (!profile) return null;
     const requestedFen = this.chess.fen();
     const generation = ++this.searchGeneration;
@@ -414,5 +450,18 @@ export class GameController {
     if (!this.clockEnabled) return;
     this.humanTimeMs = this.remainingHumanTimeMs;
     this.humanClockStartedAt = null;
+  }
+
+  /** A board leaf became visible/alive. The first one resumes shared play. */
+  openBoard(): void {
+    this.openBoardCount++;
+    if (this.openBoardCount === 1) this.resumeHumanClock();
+  }
+
+  /** A board leaf closed. Other leaves keep the shared clock running. */
+  closeBoard(): void {
+    if (this.openBoardCount === 0) return;
+    this.openBoardCount--;
+    if (this.openBoardCount === 0) this.pauseHumanClock();
   }
 }

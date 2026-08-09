@@ -2,6 +2,7 @@ import type { PieceSymbol, Square } from "chess.js";
 
 export type PlayerColor = "w" | "b";
 export type PlayerColorChoice = PlayerColor | "random";
+export type BoardOrientation = "player" | "white" | "black";
 
 /** 1 = should lose to a beginner, 10 = plays every game near its best. */
 export type Difficulty = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
@@ -44,6 +45,10 @@ export interface AppliedResult {
   to: number;
   /** Streak before this game, so undo can restore it exactly. */
   streakBefore: number;
+  /** A manual level choice made after this result owns the current level and
+   *  streak. Undo may still reopen the game, but must not overwrite that newer
+   *  choice with this result's old state. */
+  superseded?: boolean;
 }
 
 export interface SavedGame {
@@ -51,6 +56,8 @@ export interface SavedGame {
   /** SAN history from the initial position, used to restore undo and last-move state. */
   sanHistory: string[];
   playerColor: PlayerColor;
+  /** Bot level fixed when this game began. */
+  difficulty?: Difficulty;
   /** Optional for compatibility with saves created before resignation was persisted. */
   resigned?: boolean;
   /** Time control this game was started with; 0 means the game has no clock. */
@@ -71,14 +78,14 @@ export interface SavedGame {
 export interface ChessBotSettings {
   difficulty: Difficulty;
   playerColor: PlayerColorChoice;
+  /** Which side is drawn at the bottom of the board. */
+  boardOrientation: BoardOrientation;
   soundEnabled: boolean;
   soundVolume: number;
   /** Minutes on the human player's clock for a new game; 0 plays without one. */
   timeControlMinutes: number;
   /** Seconds added to the human clock after each of their moves; 0 is off. */
   incrementSeconds: number;
-  /** Show the engine's own evaluation of its last move. */
-  showEvaluation: boolean;
   /** Draw an arrow across the board for the bot's last move. */
   showMoveArrow: boolean;
   /** Move the level a step once the same result repeats often enough. */
@@ -95,11 +102,11 @@ export interface ChessBotSettings {
 export const DEFAULT_SETTINGS: ChessBotSettings = {
   difficulty: 5,
   playerColor: "w",
+  boardOrientation: "player",
   soundEnabled: true,
   soundVolume: 55,
   timeControlMinutes: 10,
   incrementSeconds: 0,
-  showEvaluation: false,
   showMoveArrow: true,
   adaptiveDifficulty: false,
   adaptiveThreshold: 3,

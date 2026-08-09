@@ -59,6 +59,20 @@ export default async function run() {
     return true;
   });
 
+  const rulesSrc = await bundle("src/rules.ts");
+  const { illegalMoveReason } = load(rulesSrc);
+
+  s.check("illegal moves explain blockers and king safety", () => {
+    const opening = new Chess();
+    const blocked = illegalMoveReason(opening, "c1", "h6");
+    const pawn = illegalMoveReason(opening, "e2", "f3");
+    const pinned = new Chess("4r1k1/8/8/8/8/8/4R3/4K3 w - - 0 1");
+    const exposesKing = illegalMoveReason(pinned, "e2", "f2");
+    return blocked === "Путь фигуры перекрыт."
+      && pawn === "Пешка идёт вперёд, а берёт по диагонали."
+      && exposesKing === "Король останется под шахом.";
+  });
+
   const searchSrc = await bundle("src/search.ts");
   const { findMove, rankRootMoves } = load(searchSrc);
 
@@ -171,6 +185,22 @@ export default async function run() {
     const historyBefore = chess.history().join(" ");
     findMove(chess, DIFFICULTY_PROFILES[8], () => 0.99);
     return chess.fen() === before && chess.history().join(" ") === historyBefore;
+  });
+
+  s.check("a second occurrence is not scored as a threefold draw", () => {
+    const chess = new Chess("4k3/8/8/8/8/8/4K3/3Q4 w - - 0 1");
+    const repeated = new Chess(chess.fen());
+    repeated.move({ from: "d1", to: "d2" });
+    // Pretend the child position has occurred once before. Making Qd2 during
+    // search brings its count to two, which is not yet a claimable draw.
+    chess._positionCount.set(repeated._hash, 1);
+    const profile = {
+      ...DIFFICULTY_PROFILES[1], depth: 1, quiescence: false,
+      topN: 1, blunderChance: 0, openingBook: false
+    };
+    const result = rankRootMoves(chess, profile)
+      .find(entry => entry.move.from === "d1" && entry.move.to === "d2");
+    return result && result.score > 500;
   });
 
   // --- opening book ---------------------------------------------------------
