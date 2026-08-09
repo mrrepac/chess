@@ -4,6 +4,8 @@ Play chess against a built-in bot in an [Obsidian](https://obsidian.md) pane. No
 
 Русское описание: [README.ru.md](README.ru.md)
 
+<img src="docs/board.png" alt="The chess board in an Obsidian pane" width="440">
+
 ## Highlights
 
 - **Ten difficulty levels that actually differ.** The table behind them is measured, not guessed. What makes the low levels genuinely beatable is not a smaller number: below level 4 the search has no capture-only extension at its leaves, so the bot walks a piece onto a square it just vacated a capture from — a mistake you can see and punish, rather than "weaker Elo". The top levels always play the best move they found and search three to four plies deep inside their time budget.
