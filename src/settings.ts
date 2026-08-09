@@ -1,16 +1,17 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type ChessBotPlugin from "./main";
 import { confirm } from "./confirm";
+import { describeDifficulty, describeRecord, t } from "./i18n";
+import type { I18nKey } from "./i18n";
 import {
-  clampAdaptiveThreshold, clampDifficulty, describeDifficulty, describeRecord,
-  MAX_ADAPTIVE_THRESHOLD, MIN_ADAPTIVE_THRESHOLD
+  clampAdaptiveThreshold, clampDifficulty, MAX_ADAPTIVE_THRESHOLD, MIN_ADAPTIVE_THRESHOLD
 } from "./types";
 import type { Difficulty, LevelRecord } from "./types";
 
+/** Spelled out per value rather than assembled from a number and a noun: the
+ *  Russian side needs a different plural for each one anyway. */
 function describeThreshold(games: number): string {
-  if (games === 1) return "1 — уровень меняется после каждой партии";
-  const plural = games === 2 || games === 3 || games === 4 ? "победы" : "побед";
-  return `${games} — ${games} ${plural} подряд поднимают уровень, столько же поражений опускают`;
+  return t(`threshold${clampAdaptiveThreshold(games)}` as I18nKey);
 }
 
 export class ChessSettingTab extends PluginSettingTab {
@@ -26,11 +27,10 @@ export class ChessSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     const difficultySetting = new Setting(containerEl)
-      .setName("Сложность новой партии")
+      .setName(t("setDifficulty"))
       .setDesc(describeDifficulty(this.plugin.settings.difficulty));
     difficultySetting.addSlider(slider => slider
       .setLimits(1, 10, 1)
-      .setDynamicTooltip()
       .setValue(this.plugin.settings.difficulty)
       .onChange(async (value) => {
         difficultySetting.setDesc(describeDifficulty(clampDifficulty(value)));
@@ -38,10 +38,8 @@ export class ChessSettingTab extends PluginSettingTab {
       }));
 
     new Setting(containerEl)
-      .setName("Подстраивать сложность под результат")
-      .setDesc("Уровень двигается на единицу, когда один и тот же результат повторяется подряд. "
-        + "Ничья и пат серию прерывают, но уровень не меняют. Просмотр прошлых позиций "
-        + "правой и левой кнопками мыши не изменяет результат партии.")
+      .setName(t("setAdaptive"))
+      .setDesc(t("setAdaptiveDesc"))
       .addToggle(toggle => toggle
         .setValue(this.plugin.settings.adaptiveDifficulty)
         .onChange(async (value) => {
@@ -52,11 +50,10 @@ export class ChessSettingTab extends PluginSettingTab {
 
     if (this.plugin.settings.adaptiveDifficulty) {
       const thresholdSetting = new Setting(containerEl)
-        .setName("Партий подряд для смены уровня")
+        .setName(t("setThreshold"))
         .setDesc(describeThreshold(this.plugin.settings.adaptiveThreshold));
       thresholdSetting.addSlider(slider => slider
         .setLimits(MIN_ADAPTIVE_THRESHOLD, MAX_ADAPTIVE_THRESHOLD, 1)
-        .setDynamicTooltip()
         .setValue(this.plugin.settings.adaptiveThreshold)
         .onChange(async (value) => {
           const games = clampAdaptiveThreshold(value);
@@ -67,12 +64,12 @@ export class ChessSettingTab extends PluginSettingTab {
     }
 
     new Setting(containerEl)
-      .setName("Цвет по умолчанию")
-      .setDesc("Каким цветом играть в новой партии («Случайно» выбирает при каждой новой игре).")
+      .setName(t("setColor"))
+      .setDesc(t("setColorDesc"))
       .addDropdown(dropdown => dropdown
-        .addOption("w", "Белые")
-        .addOption("b", "Чёрные")
-        .addOption("random", "Случайно")
+        .addOption("w", t("optWhite"))
+        .addOption("b", t("optBlack"))
+        .addOption("random", t("optRandom"))
         .setValue(this.plugin.settings.playerColor)
         .onChange(async (value) => {
           this.plugin.settings.playerColor = value as typeof this.plugin.settings.playerColor;
@@ -80,12 +77,12 @@ export class ChessSettingTab extends PluginSettingTab {
         }));
 
     new Setting(containerEl)
-      .setName("Ориентация доски")
-      .setDesc("Какие фигуры находятся внизу. Применяется сразу и не меняет цвет игрока.")
+      .setName(t("setOrientation"))
+      .setDesc(t("setOrientationDesc"))
       .addDropdown(dropdown => dropdown
-        .addOption("player", "Со стороны игрока")
-        .addOption("white", "Белые снизу")
-        .addOption("black", "Чёрные снизу")
+        .addOption("player", t("optPlayerSide"))
+        .addOption("white", t("optWhiteBottom"))
+        .addOption("black", t("optBlackBottom"))
         .setValue(this.plugin.settings.boardOrientation)
         .onChange(async (value) => {
           this.plugin.settings.boardOrientation = value as typeof this.plugin.settings.boardOrientation;
@@ -93,16 +90,15 @@ export class ChessSettingTab extends PluginSettingTab {
         }));
 
     new Setting(containerEl)
-      .setName("Контроль времени")
-      .setDesc("Сколько минут даётся вам на партию. Отсчёт начинается с вашего первого хода "
-        + "и идёт только пока доска открыта.")
+      .setName(t("setTimeControl"))
+      .setDesc(t("setTimeControlDesc"))
       .addDropdown(dropdown => dropdown
-        .addOption("0", "Без часов")
-        .addOption("5", "5 минут")
-        .addOption("10", "10 минут")
-        .addOption("15", "15 минут")
-        .addOption("30", "30 минут")
-        .addOption("60", "60 минут")
+        .addOption("0", t("optNoClock"))
+        .addOption("5", t("optMin5"))
+        .addOption("10", t("optMin10"))
+        .addOption("15", t("optMin15"))
+        .addOption("30", t("optMin30"))
+        .addOption("60", t("optMin60"))
         .setValue(String(this.plugin.settings.timeControlMinutes))
         .onChange(async (value) => {
           this.plugin.settings.timeControlMinutes = Number(value);
@@ -110,16 +106,15 @@ export class ChessSettingTab extends PluginSettingTab {
         }));
 
     new Setting(containerEl)
-      .setName("Добавка за ход")
-      .setDesc("Сколько секунд возвращается на ваши часы после каждого вашего хода. "
-        + "Применяется к новым партиям.")
+      .setName(t("setIncrement"))
+      .setDesc(t("setIncrementDesc"))
       .addDropdown(dropdown => dropdown
-        .addOption("0", "Без добавки")
-        .addOption("2", "+2 секунды")
-        .addOption("3", "+3 секунды")
-        .addOption("5", "+5 секунд")
-        .addOption("10", "+10 секунд")
-        .addOption("30", "+30 секунд")
+        .addOption("0", t("optInc0"))
+        .addOption("2", t("optInc2"))
+        .addOption("3", t("optInc3"))
+        .addOption("5", t("optInc5"))
+        .addOption("10", t("optInc10"))
+        .addOption("30", t("optInc30"))
         .setValue(String(this.plugin.settings.incrementSeconds))
         .onChange(async (value) => {
           this.plugin.settings.incrementSeconds = Number(value);
@@ -127,9 +122,8 @@ export class ChessSettingTab extends PluginSettingTab {
         }));
 
     new Setting(containerEl)
-      .setName("Стрелка хода бота")
-      .setDesc("После хода бота рисует на доске стрелку от поля к полю. "
-        + "Подсветка обоих полей остаётся в любом случае.")
+      .setName(t("setArrow"))
+      .setDesc(t("setArrowDesc"))
       .addToggle(toggle => toggle
         .setValue(this.plugin.settings.showMoveArrow)
         .onChange(async (value) => {
@@ -138,8 +132,8 @@ export class ChessSettingTab extends PluginSettingTab {
         }));
 
     new Setting(containerEl)
-      .setName("Звуки игры")
-      .setDesc("Мягкие звуки ходов, взятий, шаха и окончания партии.")
+      .setName(t("setSounds"))
+      .setDesc(t("setSoundsDesc"))
       .addToggle(toggle => toggle
         .setValue(this.plugin.settings.soundEnabled)
         .onChange(async (value) => {
@@ -148,11 +142,10 @@ export class ChessSettingTab extends PluginSettingTab {
         }));
 
     const volumeSetting = new Setting(containerEl)
-      .setName("Громкость звуков")
+      .setName(t("setVolume"))
       .setDesc(`${this.plugin.settings.soundVolume}%`);
     volumeSetting.addSlider(slider => slider
         .setLimits(0, 100, 1)
-        .setDynamicTooltip()
         .setValue(this.plugin.settings.soundVolume)
         .onChange(async (value) => {
           this.plugin.settings.soundVolume = value;
@@ -175,12 +168,12 @@ export class ChessSettingTab extends PluginSettingTab {
       .filter(level => Number.isInteger(level))
       .sort((a, b) => a - b) as Difficulty[];
 
-    new Setting(containerEl).setName("Статистика").setHeading();
+    new Setting(containerEl).setName(t("headStats")).setHeading();
 
     if (levels.length === 0) {
       containerEl.createEl("p", {
         cls: "setting-item-description",
-        text: "Ни одной законченной партии пока нет. Счёт появится здесь сам."
+        text: t("statsEmpty")
       });
       return;
     }
@@ -193,26 +186,26 @@ export class ChessSettingTab extends PluginSettingTab {
       total.losses += record.losses;
       total.draws += record.draws;
       new Setting(containerEl)
-        .setName(`Уровень ${level}`)
+        .setName(t("statsLevel", { level }))
         .setDesc(describeRecord(record));
     }
 
     if (levels.length > 1) {
-      new Setting(containerEl).setName("Всего").setDesc(describeRecord(total));
+      new Setting(containerEl).setName(t("statsTotal")).setDesc(describeRecord(total));
     }
 
     new Setting(containerEl)
-      .setName("Сбросить статистику")
-      .setDesc("Стирает счёт по всем уровням. Текущую серию результатов не трогает.")
+      .setName(t("setReset"))
+      .setDesc(t("setResetDesc"))
       .addButton(button => button
-        .setButtonText("Сбросить")
+        .setButtonText(t("btnReset"))
         .setWarning()
         .onClick(async () => {
           const agreed = await confirm(
             this.app,
-            "Сбросить статистику?",
-            "Счёт по всем уровням будет стёрт, вернуть его будет неоткуда.",
-            "Сбросить"
+            t("resetStatsTitle"),
+            t("resetStatsBody"),
+            t("resetStatsConfirm")
           );
           if (!agreed) return;
           this.plugin.settings.levelStats = {};

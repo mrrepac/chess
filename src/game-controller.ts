@@ -340,7 +340,7 @@ export class GameController {
       }
       // Undo is user-initiated and rare, so rebuilding the verbose history here
       // is the one place where its cost does not matter.
-      const history = this.chess.history({ verbose: true }) as Move[];
+      const history = this.chess.history({ verbose: true });
       this.lastMove = history[history.length - 1] ?? null;
     }
     if (this.chess.turn() === this.humanColor) this.resumeHumanClock();

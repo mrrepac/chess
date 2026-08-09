@@ -11,6 +11,18 @@ export default async function run() {
   s.check("the contextual action is cleared before its icon and label are rebuilt",
     /actionBtn\.empty\(\);\s+setIcon\(actionBtn/.test(viewSource));
 
+  // Obsidian's createEl/createDiv/createSpan pass `parent: this` to the global
+  // helper, so calling one on a *document* asks the DOM to append an element to
+  // the document itself, which throws — and the helper builds the element with
+  // the main window's document, which breaks a popped-out board. Both are easy
+  // to reintroduce: eslint-plugin-obsidianmd actively recommends it. Doing so
+  // once already killed the board's render loop on its first piece.
+  const piecesSource = await readFile(new URL("../src/pieces.ts", import.meta.url), "utf8");
+  s.check("pieces are built with the view's own createElement",
+    /doc\.createElement\("img"\)/.test(piecesSource) && !/\bdoc\.create(?:El|Div|Span)\(/.test(piecesSource));
+  s.check("the drag preview is too",
+    !/\bthis\.doc\.create(?:El|Div|Span)\(/.test(viewSource));
+
   const registered = [];
   const commands = [];
   let settingTabAdded = false;
@@ -32,6 +44,10 @@ export default async function run() {
   const notices = [];
   const obsidianStub = {
     Plugin: PluginStub,
+    // Every string goes through src/i18n.ts, which asks Obsidian for the app's
+    // language. "en" is what the plugin ships as by default, so that is what is
+    // tested here.
+    moment: { locale: () => "en" },
     Notice: class { constructor(message) { notices.push(message); } },
     Modal: class { constructor(app) { this.app = app; } open() {} close() {} },
     ItemView: class { constructor(leaf) { this.leaf = leaf; this.contentEl = { empty() {}, addClass() {}, createDiv: () => ({ createEl: () => ({ addEventListener() {} }), addEventListener() {} }) }; } },
@@ -55,7 +71,7 @@ export default async function run() {
   s.check("registers the chess view", registered.some(r => r.type === "chess-bot-view"));
   s.check("adds a ribbon icon", ribbonAdded);
   s.check("adds a settings tab", settingTabAdded);
-  s.check("registers the open-chess command", commands.some(c => c.id === "open-chess"));
+  s.check("registers the open-board command", commands.some(c => c.id === "open-board"));
   s.check("loads default settings (difficulty 5)", plugin.settings.difficulty === 5);
   s.check("defaults to a ten-minute clock", plugin.settings.timeControlMinutes === 10);
   s.check("the bot's move arrow is on by default", plugin.settings.showMoveArrow === true);

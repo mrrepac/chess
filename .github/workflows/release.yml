@@ -1,0 +1,63 @@
+name: Release Obsidian plugin
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # `npm run build` type-checks and runs the test suite before it bundles,
+      # so a broken release cannot get past this step.
+      - name: Build
+        run: npm run build
+
+      # main.js is committed as well, but the release is built from src/: the
+      # published file is then provably what the sources say, not somebody's
+      # forgotten local edit.
+      - name: Fail if the committed bundle is stale
+        run: |
+          if ! git diff --quiet -- main.js; then
+            echo "main.js in the repository does not match a build from src/."
+            echo "Build locally (npm run build) and commit the result."
+            git --no-pager diff --stat -- main.js
+            exit 1
+          fi
+
+      - name: Attest build provenance for release assets
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
+
+      - name: Create or update release with assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          # If the release was already made by hand, upload the assets into it
+          # (with provenance) instead of failing.
+          gh release create "$tag" \
+            --title="$tag" \
+            --notes="Chess $tag. See README for details." \
+            main.js manifest.json styles.css \
+            || gh release upload "$tag" main.js manifest.json styles.css --clobber

@@ -16,11 +16,20 @@ export default async function run() {
   s.check("top level has no blunder chance", DIFFICULTY_PROFILES[10].blunderChance === 0);
   s.check("bottom level has quiescence off", DIFFICULTY_PROFILES[1].quiescence === false);
 
-  const assetsSrc = await bundle("src/staunty-assets.ts");
-  const { STAUNTY_PIECES } = load(assetsSrc);
+  const assetsSrc = await bundle("src/piece-assets.ts");
+  const { PIECE_IMAGES } = load(assetsSrc);
   const expectedPieces = ["wk", "wq", "wr", "wb", "wn", "wp", "bk", "bq", "br", "bb", "bn", "bp"];
-  s.check("Staunty set contains all 12 original SVG pieces", () =>
-    expectedPieces.every(key => STAUNTY_PIECES[key]?.startsWith("data:image/svg+xml;base64,")));
+  s.check("the piece set contains all 12 SVG pieces", () =>
+    expectedPieces.every(key => PIECE_IMAGES[key]?.startsWith("data:image/svg+xml;base64,")));
+
+  // The vendoring script strips Inkscape's editor state out of the artwork.
+  // A drawing that lost a path on the way in would still be a valid data URI.
+  s.check("every piece still carries a drawing", () =>
+    expectedPieces.every(key => {
+      const svg = Buffer.from(PIECE_IMAGES[key].split(",")[1], "base64").toString("utf8");
+      return svg.startsWith("<svg") && svg.endsWith("</svg>") && /<path[\s/>]/.test(svg)
+        && !svg.includes("sodipodi:") && !svg.includes("inkscape:");
+    }));
 
   // --- the private chess.js API the search is built on -----------------------
   // These pin the assumptions in src/engine-board.ts. If a chess.js upgrade
@@ -60,7 +69,10 @@ export default async function run() {
   });
 
   const rulesSrc = await bundle("src/rules.ts");
-  const { illegalMoveReason } = load(rulesSrc);
+  // The reasons are localized, so the module now reaches for the app language.
+  const enObsidian = { moment: { locale: () => "en" } };
+  const ruObsidian = { moment: { locale: () => "ru" } };
+  const { illegalMoveReason } = load(rulesSrc, { modules: { obsidian: enObsidian } });
 
   s.check("illegal moves explain blockers and king safety", () => {
     const opening = new Chess();
@@ -68,10 +80,17 @@ export default async function run() {
     const pawn = illegalMoveReason(opening, "e2", "f3");
     const pinned = new Chess("4r1k1/8/8/8/8/8/4R3/4K3 w - - 0 1");
     const exposesKing = illegalMoveReason(pinned, "e2", "f2");
-    return blocked === "Путь фигуры перекрыт."
-      && pawn === "Пешка идёт вперёд, а берёт по диагонали."
-      && exposesKing === "Король останется под шахом.";
+    return blocked === "The piece's path is blocked."
+      && pawn === "A pawn moves forward and captures diagonally."
+      && exposesKing === "The king would be left in check.";
   });
+
+  // The catalogue wants an English interface; the Russian one is what this
+  // vault actually plays in. A key present in one table and missing from the
+  // other would surface as an English string in a Russian sentence.
+  const ruRules = load(rulesSrc, { modules: { obsidian: ruObsidian } });
+  s.check("a Russian app gets the Russian reason", () =>
+    ruRules.illegalMoveReason(new Chess(), "c1", "h6") === "Путь фигуры перекрыт.");
 
   const searchSrc = await bundle("src/search.ts");
   const { findMove, rankRootMoves } = load(searchSrc);

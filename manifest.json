@@ -1,7 +1,7 @@
 {
   "id": "chess",
   "name": "Chess",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "minAppVersion": "1.7.2",
   "description": "Play chess against a built-in bot with adjustable 1-10 difficulty, in a workspace pane.",
   "author": "mrrepac",

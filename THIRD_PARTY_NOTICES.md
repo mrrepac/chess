@@ -1,11 +1,20 @@
 # Third-party artwork
 
-## Staunty chess pieces
+## Papercut chess pieces
 
-- Artist: sadsnake1 (Sad Knight)
-- Source: Lichess piece assets
-- License: Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
-- License text: https://creativecommons.org/licenses/by-nc-sa/4.0/
+- Artist: Nikolay Anzarov
+- License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+- License text: https://creativecommons.org/licenses/by/4.0/
+- Source: distributed with lichess, `public/piece/papercut` in
+  https://github.com/lichess-org/lila — the attribution and license above are
+  recorded in that repository's
+  [COPYING.md](https://github.com/lichess-org/lila/blob/master/COPYING.md).
 
-The original, unmodified white and black SVG pieces are embedded in the plugin bundle.
-They remain licensed separately from the plugin source code under CC BY-NC-SA 4.0.
+The white and black SVG pieces are embedded in the plugin bundle. The drawings
+themselves are unmodified; the vendoring script (`vendor-pieces.mjs`) only
+removes the Inkscape editor state each file carries — canvas settings and
+`inkscape:`/`sodipodi:` attributes, which render nothing — and checks that the
+element census of the drawing is unchanged afterwards.
+
+The artwork remains licensed under CC BY 4.0, separately from the plugin's own
+source code, which is MIT (see LICENSE).

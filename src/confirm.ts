@@ -1,4 +1,5 @@
 import { App, Modal, Setting } from "obsidian";
+import { t } from "./i18n";
 
 /**
  * A yes/no box for the one button on the board that cannot be taken back
@@ -25,7 +26,7 @@ class ConfirmModal extends Modal {
     this.contentEl.createEl("p", { text: this.body });
     new Setting(this.contentEl)
       .addButton(button => {
-        button.setButtonText("Отмена").onClick(() => this.finish(false));
+        button.setButtonText(t("btnCancel")).onClick(() => this.finish(false));
         this.cancelEl = button.buttonEl;
       })
       .addButton(button => {
@@ -38,7 +39,7 @@ class ConfirmModal extends Modal {
     //
     // Straight off the document, in the capture phase, rather than through
     // `this.scope.register("Enter")` — that never fired here, and the key went
-    // on reaching whichever button the browser had focused, which is "Отмена".
+    // on reaching whichever button the browser had focused, which is "Cancel".
     // Nothing else can be listening while a modal is open, so capturing the key
     // outright is safe and does not depend on where the focus ended up.
     this.contentEl.doc.addEventListener("keydown", this.handleKey, true);
@@ -49,7 +50,7 @@ class ConfirmModal extends Modal {
 
   private handleKey = (event: KeyboardEvent): void => {
     if (event.key !== "Enter" || this.decided) return;
-    // Deliberately tabbing to "Отмена" is the one case Enter must not read as
+    // Deliberately tabbing to "Cancel" is the one case Enter must not read as
     // agreement: there the key belongs to the button the person chose.
     if (this.contentEl.doc.activeElement === this.cancelEl) return;
     event.preventDefault();

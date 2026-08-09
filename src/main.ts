@@ -2,8 +2,9 @@ import { Notice, Plugin } from "obsidian";
 import { ChessSettingTab } from "./settings";
 import { GameController } from "./game-controller";
 import { ChessView, VIEW_TYPE_CHESS } from "./view";
+import { describeRecord, t } from "./i18n";
 import {
-  clampAdaptiveThreshold, clampDifficulty, DEFAULT_SETTINGS, describeRecord, MAX_DIFFICULTY,
+  clampAdaptiveThreshold, clampDifficulty, DEFAULT_SETTINGS, MAX_DIFFICULTY,
   MIN_DIFFICULTY, sanitizeLevelStats
 } from "./types";
 import type { ChessBotSettings, Difficulty, GameOutcome, LevelRecord } from "./types";
@@ -32,11 +33,11 @@ export default class ChessBotPlugin extends Plugin {
     this.controller.onChange(() => this.onGameChanged());
 
     this.registerView(VIEW_TYPE_CHESS, (leaf) => new ChessView(leaf, this));
-    this.addRibbonIcon("crown", "Открыть шахматы", () => this.activateView());
+    this.addRibbonIcon("crown", t("ribbonOpen"), () => this.activateView());
 
     this.addCommand({
-      id: "open-chess",
-      name: "Открыть доску",
+      id: "open-board",
+      name: t("cmdOpen"),
       callback: () => this.activateView()
     });
 
@@ -73,20 +74,21 @@ export default class ChessBotPlugin extends Plugin {
     await this.saveSettings();
   }
 
-  /** "Побед 4 · поражений 2 · ничьих 1" at one level, for the board and the
-   *  settings tab. Empty for a level with no finished games behind it. */
+  /** "Wins 4 · losses 2 · draws 1" at one level, for the board and the settings
+   *  tab. Empty for a level with no finished games behind it. */
   describeLevelRecord(level: Difficulty): string {
     return describeRecord(this.settings.levelStats[level]);
   }
 
-  /** " · побед подряд: 2 из 3" for the difficulty button's tooltip. */
+  /** " · wins in a row: 2 of 3" for the difficulty button's tooltip. */
   describeStreak(): string {
     if (!this.settings.adaptiveDifficulty) return "";
     const streak = this.settings.resultStreak;
     if (streak === 0) return "";
-    const threshold = this.settings.adaptiveThreshold;
-    const word = streak > 0 ? "побед" : "поражений";
-    return ` · ${word} подряд: ${Math.abs(streak)} из ${threshold}`;
+    return t(streak > 0 ? "streakWins" : "streakLosses", {
+      run: Math.abs(streak),
+      threshold: this.settings.adaptiveThreshold
+    });
   }
 
   /**
@@ -203,19 +205,19 @@ export default class ChessBotPlugin extends Plugin {
     this.controller.resultApplied = { from, to, streakBefore };
 
     let notice = "";
-    if (to > from) notice = `Победа! Сложность бота повышена до ${to}.`;
-    else if (to < from) notice = `Поражение. Сложность бота понижена до ${to}.`;
+    if (to > from) notice = t("adaptUp", { to });
+    else if (to < from) notice = t("adaptDown", { to });
     else if (outcome === "draw") {
-      if (streakBefore !== 0) notice = "Ничья — серия прервана, сложность прежняя.";
+      if (streakBefore !== 0) notice = t("adaptDraw");
     } else if (reached) {
       // The streak filled up but the level had nowhere left to go.
       notice = outcome === "win"
-        ? `Победа! Сложность уже максимальная (${MAX_DIFFICULTY}).`
-        : `Поражение. Сложность уже минимальная (${MIN_DIFFICULTY}).`;
+        ? t("adaptMax", { max: MAX_DIFFICULTY })
+        : t("adaptMin", { min: MIN_DIFFICULTY });
     } else {
       notice = outcome === "win"
-        ? `Победа! Побед подряд: ${runLength} из ${threshold}.`
-        : `Поражение. Поражений подряд: ${runLength} из ${threshold}.`;
+        ? t("adaptWinRun", { run: runLength, threshold })
+        : t("adaptLossRun", { run: runLength, threshold });
     }
     if (notice) new Notice(notice, 5000);
     return true;
@@ -238,7 +240,7 @@ export default class ChessBotPlugin extends Plugin {
   /**
    * data.json is a plain file the person can edit, and a value out of range is
    * not harmless: a difficulty with no profile behind it left the bot silently
-   * refusing to move, with the status line stuck on "Ход бота".
+   * refusing to move, with the status line stuck on "the bot's move".
    */
   async loadSettings() {
     const raw = (await this.loadData()) as (Partial<ChessBotSettings> & { showEvaluation?: unknown }) | null;

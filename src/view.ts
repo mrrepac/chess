@@ -2,9 +2,9 @@ import { ItemView, Menu, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
 import { Chess, type Move, type PieceSymbol, type Square } from "chess.js";
 import type ChessBotPlugin from "./main";
 import type { GameController } from "./game-controller";
-import {
-  clampDifficulty, describeDifficulty, formatRecord, MAX_DIFFICULTY, MIN_DIFFICULTY
-} from "./types";
+import { clampDifficulty, formatRecord, MAX_DIFFICULTY, MIN_DIFFICULTY } from "./types";
+import { describeDifficulty, t } from "./i18n";
+import type { I18nKey } from "./i18n";
 import type { Difficulty, PlayerColor } from "./types";
 import {
   findKing, illegalMoveReason, isLightSquare, legalMovesFrom, squareAt, statusText
@@ -73,7 +73,7 @@ export class ChessView extends ItemView {
   }
 
   getDisplayText(): string {
-    return "Шахматы";
+    return t("viewTitle");
   }
 
   /** The view's own document/window, so a popped-out pane keeps working:
@@ -109,7 +109,7 @@ export class ChessView extends ItemView {
     this.lastMoveEl = statusGroup.createSpan({ cls: "chess-bot-last-move" });
     this.retryBtn = statusGroup.createEl("button", { cls: "chess-bot-retry-button" });
     setIcon(this.retryBtn, "refresh-cw");
-    setTooltip(this.retryBtn, "Повторить ход бота");
+    setTooltip(this.retryBtn, t("tipRetry"));
     this.retryBtn.addEventListener("click", () => void this.maybeTriggerBot());
 
     const controls = this.topbarEl.createDiv({ cls: "chess-bot-controls" });
@@ -127,7 +127,7 @@ export class ChessView extends ItemView {
       return button;
     };
 
-    const actionBtn = iconButton("plus", "Новая партия");
+    const actionBtn = iconButton("plus", t("tipNewGame"));
     actionBtn.addEventListener("click", () => {
       if (this.reviewPly !== null) return;
       if (!this.controller.isGameOver && this.controller.historyLength > 0) {
@@ -145,15 +145,15 @@ export class ChessView extends ItemView {
       const current = this.controller.gameDifficulty;
       const next = this.plugin.settings.difficulty;
       difficultyBtn.empty();
-      difficultyBtn.createSpan({ cls: "chess-bot-level-prefix", text: "Ур " });
+      difficultyBtn.createSpan({ cls: "chess-bot-level-prefix", text: t("levelPrefix") });
       difficultyBtn.createSpan({ text: current === next ? String(current) : `${current}→${next}` });
       // One line: the tooltip is a single run of text, so a newline in here
       // would come out as a space anyway.
       setTooltip(difficultyBtn, [
-        `Уровень этой партии: ${current} из ${MAX_DIFFICULTY}`,
-        next === current ? "Изменение применится к следующей партии" : `Следующая партия: уровень ${next}`,
+        t("tipLevelCurrent", { current, max: MAX_DIFFICULTY }),
+        next === current ? t("tipLevelNextSame") : t("tipLevelNext", { next }),
         this.plugin.describeLevelRecord(current),
-        `Колесо и правая кнопка — выбрать следующий уровень${this.plugin.describeStreak()}`
+        t("tipLevelPick", { streak: this.plugin.describeStreak() })
       ].filter(Boolean).join(". "));
     };
     difficultyBtn.addEventListener("click", () => {
@@ -179,11 +179,11 @@ export class ChessView extends ItemView {
       actionBtn.empty();
       setIcon(actionBtn, canResign ? "flag" : "plus");
       actionBtn.toggleClass("finished", finished);
-      if (finished) actionBtn.createSpan({ cls: "chess-bot-action-label", text: "Новая" });
+      if (finished) actionBtn.createSpan({ cls: "chess-bot-action-label", text: t("labelNew") });
       actionBtn.disabled = this.reviewPly !== null;
       setTooltip(actionBtn, this.reviewPly !== null
-        ? "Сначала вернитесь к текущей позиции"
-        : canResign ? "Сдаться" : finished ? "Новая партия (Enter)" : "Новая партия");
+        ? t("tipReviewFirst")
+        : canResign ? t("tipResign") : finished ? t("tipNewGameEnter") : t("tipNewGame"));
     };
 
     this.syncToolbar = () => {
@@ -193,7 +193,7 @@ export class ChessView extends ItemView {
     this.syncToolbar();
     this.boardEl = root.createDiv({ cls: "chess-bot-board" });
     this.boardEl.setAttribute("role", "grid");
-    this.boardEl.setAttribute("aria-label", "Шахматная доска");
+    this.boardEl.setAttribute("aria-label", t("ariaBoard"));
     this.boardEl.setAttribute("aria-rowcount", "8");
     this.boardEl.setAttribute("aria-colcount", "8");
     this.boardEl.addEventListener("pointerdown", this.handlePointerDown);
@@ -207,7 +207,7 @@ export class ChessView extends ItemView {
     // a board with no layout yet has nothing to measure, and this fires as soon
     // as it does. The constructor comes from the view's own window, so a
     // popped-out board observes with that window's implementation.
-    const win = this.win as Window & typeof globalThis;
+    const win = this.win as unknown as { ResizeObserver: typeof ResizeObserver };
     this.boardResize = new win.ResizeObserver(() => this.drawBotMoveArrow());
     this.boardResize.observe(this.boardEl);
 
@@ -336,7 +336,7 @@ export class ChessView extends ItemView {
     if (!piece || piece.color !== this.controller.humanColor) return;
 
     this.selected = square;
-    this.legalTargets = new Set(legalMovesFrom(this.controller.chess, square).map(m => m.to as Square));
+    this.legalTargets = new Set(legalMovesFrom(this.controller.chess, square).map(m => m.to));
     this.drag = {
       from: square,
       pointerId: event.pointerId,
@@ -469,6 +469,9 @@ export class ChessView extends ItemView {
     const source = this.boardEl.querySelector<HTMLElement>(`[data-square="${square}"]`);
     if (!piece || !source) return null;
 
+    // Plain createElement, for the reason spelled out in pieces.ts: Obsidian's
+    // createSpan on a *document* tries to append the span to the document
+    // itself and throws.
     const preview = this.doc.createElement("span");
     preview.className = "chess-bot-drag-preview";
     const size = source.getBoundingClientRect().width * 0.88;
@@ -506,9 +509,9 @@ export class ChessView extends ItemView {
       try {
         agreed = await confirm(
           this.app,
-          "Начать новую партию?",
-          "Текущая незаконченная партия будет удалена и не попадёт в статистику.",
-          "Новая партия"
+          t("newGameTitle"),
+          t("newGameBody"),
+          t("newGameConfirm")
         );
       } finally {
         this.newGamePromptOpen = false;
@@ -537,14 +540,12 @@ export class ChessView extends ItemView {
 
   private async resignWithConfirmation(): Promise<void> {
     if (this.controller.isGameOver) return;
-    const cost = this.plugin.settings.adaptiveDifficulty
-      ? " Партия пойдёт в счёт как поражение."
-      : "";
+    const cost = this.plugin.settings.adaptiveDifficulty ? t("resignCost") : "";
     const agreed = await confirm(
       this.app,
-      "Сдаться?",
-      `Партия закончится поражением.${cost}`,
-      "Сдаться"
+      t("resignTitle"),
+      t("resignBody", { cost }),
+      t("resignConfirm")
     );
     // The clock kept running while the box was open, so the game can have
     // ended underneath it.
@@ -608,14 +609,12 @@ export class ChessView extends ItemView {
     if (piece && piece.color === this.controller.humanColor) {
       const moves = legalMovesFrom(this.controller.chess, square);
       this.selected = square;
-      this.legalTargets = new Set(moves.map(m => m.to as Square));
+      this.legalTargets = new Set(moves.map(m => m.to));
       this.render();
       // A piece with nowhere to go looks exactly like one the click missed.
       if (moves.length === 0) {
         this.flashIllegal(square, this.checkedKingSquare(square));
-        this.showHint(this.controller.chess.isCheck()
-          ? "Этой фигурой нельзя защититься от шаха."
-          : "У этой фигуры сейчас нет допустимых ходов.");
+        this.showHint(t(this.controller.chess.isCheck() ? "hintNoDefence" : "hintNoMoves"));
       }
       return;
     }
@@ -650,14 +649,13 @@ export class ChessView extends ItemView {
     square: Square,
     piece: { type: PieceSymbol; color: "w" | "b" } | undefined
   ): string {
-    const pieceNames: Record<PieceSymbol, string> = {
-      p: "пешка", n: "конь", b: "слон", r: "ладья", q: "ферзь", k: "король"
-    };
     const parts: string[] = [square];
-    if (piece) parts.push(`${piece.color === "w" ? "белые" : "чёрные"}, ${pieceNames[piece.type]}`);
-    else parts.push("пустое поле");
-    if (square === this.selected) parts.push("выбрано");
-    else if (this.legalTargets.has(square)) parts.push(piece ? "доступно для взятия" : "доступный ход");
+    if (piece) {
+      const name = t(`piece${piece.type.toUpperCase()}` as I18nKey);
+      parts.push(`${t(piece.color === "w" ? "colorWhite" : "colorBlack")}, ${name}`);
+    } else parts.push(t("squareEmpty"));
+    if (square === this.selected) parts.push(t("squareSelected"));
+    else if (this.legalTargets.has(square)) parts.push(t(piece ? "squareCapture" : "squareMove"));
     return parts.join(", ");
   }
 
@@ -671,7 +669,7 @@ export class ChessView extends ItemView {
     const moveNumber = Number(move.before.split(" ")[5]) || this.viewedChess.moveNumber();
     this.lastMoveEl.setText(move.color === "w" ? `${moveNumber}.${move.san}` : `${moveNumber}…${move.san}`);
     this.lastMoveEl.removeClass("hidden");
-    setTooltip(this.lastMoveEl, "Последний ход");
+    setTooltip(this.lastMoveEl, t("tipLastMove"));
   }
 
   private explainIllegalMove(from: Square | null, to: Square): void {
@@ -724,10 +722,7 @@ export class ChessView extends ItemView {
   }
 
   private promotionLabel(type: PieceSymbol): string {
-    const labels: Record<PieceSymbol, string> = {
-      p: "Пешка", n: "Конь", b: "Слон", r: "Ладья", q: "Ферзь", k: "Король"
-    };
-    return `Превратить в: ${labels[type]}`;
+    return t("promoteTo", { piece: t(`promo${type.toUpperCase()}` as I18nKey) });
   }
 
   private render(): void {
@@ -745,12 +740,12 @@ export class ChessView extends ItemView {
     const chess = this.viewedChess;
     this.boardEl.toggleClass("reviewing", this.reviewPly !== null);
     this.boardEl.setAttribute("aria-label", this.reviewPly === null
-      ? "Шахматная доска"
-      : `Просмотр партии, полуход ${this.reviewPly} из ${total}`);
+      ? t("ariaBoard")
+      : t("ariaReview", { ply: this.reviewPly, total }));
     const restoreFocus = this.boardEl?.contains(this.doc.activeElement) ?? false;
     const status = this.reviewPly === null
       ? this.currentStatusText(this.controller.chess, humanColor, thinking, resigned)
-      : `Просмотр: ${this.reviewPly} из ${total} · ПКМ назад, ЛКМ вперёд`;
+      : t("statusReview", { ply: this.reviewPly, total });
     this.statusEl.setText(this.transientHint ?? status);
     const outcome = this.controller.outcome;
     const tone = this.reviewPly !== null
@@ -918,14 +913,14 @@ export class ChessView extends ItemView {
   private currentStatusText(
     chess: GameController["chess"], humanColor: PlayerColor, thinking: boolean, resigned: boolean
   ): string {
-    if (this.controller.engineError) return "Движок не запустился — бот не может сходить.";
-    if (this.controller.timedOut) return "Поражение · время вышло";
-    if (resigned) return "Поражение · сдача";
-    if (chess.isCheckmate()) return chess.turn() === humanColor ? "Поражение · мат" : "Победа · мат";
-    if (chess.isStalemate()) return "Ничья · пат";
-    if (chess.isThreefoldRepetition()) return "Ничья · повторение";
-    if (chess.isInsufficientMaterial()) return "Ничья · мало материала";
-    if (chess.isDraw()) return "Ничья";
+    if (this.controller.engineError) return t("stEngineError");
+    if (this.controller.timedOut) return t("resTimeout");
+    if (resigned) return t("resResign");
+    if (chess.isCheckmate()) return t(chess.turn() === humanColor ? "resMateLoss" : "resMateWin");
+    if (chess.isStalemate()) return t("resStalemate");
+    if (chess.isThreefoldRepetition()) return t("resRepetition");
+    if (chess.isInsufficientMaterial()) return t("resInsufficient");
+    if (chess.isDraw()) return t("resDraw");
     return statusText(chess, humanColor, thinking, resigned);
   }
 
@@ -945,11 +940,9 @@ export class ChessView extends ItemView {
 
     // A clock that visibly sits still needs to say why, or it reads as broken.
     const started = this.controller.clockStarted;
-    const bonus = increment > 0 ? `, +${increment} с за каждый ваш ход` : "";
+    const bonus = increment > 0 ? t("clockBonus", { seconds: increment }) : "";
     this.clockEl.toggleClass("waiting", !started);
-    setTooltip(this.clockEl, started
-      ? `Ваше время на партию${bonus}`
-      : `Часы пойдут с вашего первого хода${bonus}`);
+    setTooltip(this.clockEl, t(started ? "tipClock" : "tipClockWaiting", { bonus }));
 
     if (remaining <= 0 && this.controller.expireHumanClock()) {
       this.sounds.play("loss");
@@ -965,8 +958,8 @@ export class ChessView extends ItemView {
     const { [human]: humanPoints, [opponent]: botPoints } = this.materialPoints(this.viewedChess);
     const balance = humanPoints - botPoints;
     const material = balance > 0 ? `+${balance}` : String(balance).replace("-", "−");
-    this.scoreEl.setText(balance === 0 ? "Ровно" : material);
-    setTooltip(this.scoreEl, `Материал на доске: вы ${humanPoints} — ${botPoints} бот`);
+    this.scoreEl.setText(balance === 0 ? t("scoreEven") : material);
+    setTooltip(this.scoreEl, t("tipMaterial", { human: humanPoints, bot: botPoints }));
     this.scoreEl.toggleClass("advantage", balance > 0);
     this.scoreEl.toggleClass("disadvantage", balance < 0);
 

@@ -173,12 +173,6 @@ export function formatRecord(record: LevelRecord | undefined): string {
   return `${wins}–${losses}–${draws}`;
 }
 
-/** The same tally spelled out, for places with room to say what the numbers are. */
-export function describeRecord(record: LevelRecord | undefined): string {
-  if (!formatRecord(record) || !record) return "";
-  return `Побед ${record.wins} · поражений ${record.losses} · ничьих ${record.draws}`;
-}
-
 /**
  * One row per level. The important lever for "genuinely beatable" at the low
  * end is `quiescence`, not depth: without a capture-only leaf extension the
@@ -228,23 +222,6 @@ export const DIFFICULTY_PROFILES: Record<Difficulty, DifficultyProfile> = {
   9: { depth: 4, timeBudgetMs: 3000, quiescence: true, topN: 1, blunderChance: 0, blunderPoolFraction: 0, openingBook: true },
   10: { depth: 5, timeBudgetMs: 4000, quiescence: true, topN: 1, blunderChance: 0, blunderPoolFraction: 0, openingBook: true }
 };
-
-/** Short RU label shown under the difficulty slider. */
-export function describeDifficulty(level: Difficulty): string {
-  const labels: Record<Difficulty, string> = {
-    1: "1 — совсем новичок, постоянно зевает фигуры",
-    2: "2 — очень слабый, легко обыграть",
-    3: "3 — видит на один ход вперёд, зевает размены",
-    4: "4 — считает размены, но часто выбирает не лучший ход",
-    5: "5 — играет разумно, иногда ошибается",
-    6: "6 — крепкий любительский уровень, думает до 1,5 с",
-    7: "7 — всегда играет лучший найденный ход, до 1,2 с",
-    8: "8 — считает глубже, думает до 2 с",
-    9: "9 — то же, но с запасом времени: до 3 с",
-    10: "10 — потолок движка: до 4 с на ход, крепкий клубный уровень"
-  };
-  return labels[level];
-}
 
 export interface MoveRequest {
   id: number;

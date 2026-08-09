@@ -1,5 +1,6 @@
 import { Chess, type Color, type Move, type Square } from "chess.js";
 import type { PlayerColor } from "./types";
+import { t } from "./i18n";
 
 export const FILES = ["a", "b", "c", "d", "e", "f", "g", "h"] as const;
 export const RANKS = [8, 7, 6, 5, 4, 3, 2, 1] as const;
@@ -13,7 +14,7 @@ export function isLightSquare(file: number, rank: number): boolean {
 }
 
 export function legalMovesFrom(chess: Chess, square: Square): Move[] {
-  return chess.moves({ square, verbose: true }) as Move[];
+  return chess.moves({ square, verbose: true });
 }
 
 /** A short explanation for an attempted move that is not in the legal list.
@@ -21,9 +22,9 @@ export function legalMovesFrom(chess: Chess, square: Square): Move[] {
  *  still illegal necessarily fails the king-safety rules. */
 export function illegalMoveReason(chess: Chess, from: Square, to: Square): string {
   const piece = chess.get(from);
-  if (!piece) return "На исходном поле нет фигуры.";
+  if (!piece) return t("illNoPiece");
   const target = chess.get(to);
-  if (target?.color === piece.color) return "Поле занято вашей фигурой.";
+  if (target?.color === piece.color) return t("illOwnPiece");
 
   const fromFile = from.charCodeAt(0) - 97;
   const toFile = to.charCodeAt(0) - 97;
@@ -43,10 +44,10 @@ export function illegalMoveReason(chess: Chess, from: Square, to: Square): strin
       if (df === 0 && dr === direction && !target) geometry = true;
       else if (df === 0 && dr === direction * 2 && fromRank === startRank && !target) {
         const middle = `${from[0]}${fromRank + direction}` as Square;
-        if (chess.get(middle)) return "Путь пешки перекрыт.";
+        if (chess.get(middle)) return t("illPawnBlocked");
         geometry = true;
       } else if (adf === 1 && dr === direction && target) geometry = true;
-      if (!geometry) return "Пешка идёт вперёд, а берёт по диагонали.";
+      if (!geometry) return t("illPawnDiagonal");
       break;
     }
     case "n":
@@ -69,11 +70,11 @@ export function illegalMoveReason(chess: Chess, from: Square, to: Square): strin
       break;
   }
 
-  if (!geometry) return "Так эта фигура не ходит.";
+  if (!geometry) return t("illGeometry");
   if (piece.type === "k" && adf === 2) {
     const middle = `${String.fromCharCode(97 + fromFile + Math.sign(df))}${fromRank}` as Square;
-    if (chess.get(middle)) return "Путь для рокировки перекрыт.";
-    return chess.isCheck() ? "Нельзя рокироваться из-под шаха." : "Рокировка сейчас недоступна.";
+    if (chess.get(middle)) return t("illCastleBlocked");
+    return chess.isCheck() ? t("illCastleCheck") : t("illCastleUnavailable");
   }
   if (slides) {
     const fileStep = Math.sign(df);
@@ -82,29 +83,29 @@ export function illegalMoveReason(chess: Chess, from: Square, to: Square): strin
     let rank = fromRank + rankStep;
     while (file !== toFile || rank !== toRank) {
       if (chess.get(`${String.fromCharCode(97 + file)}${rank}` as Square)) {
-        return "Путь фигуры перекрыт.";
+        return t("illPathBlocked");
       }
       file += fileStep;
       rank += rankStep;
     }
   }
-  return chess.isCheck() ? "Этот ход не защищает от шаха." : "Король останется под шахом.";
+  return chess.isCheck() ? t("illStillCheck") : t("illKingExposed");
 }
 
-/** Human-readable game state, in Russian, from the perspective of the person playing. */
+/** Human-readable game state, from the perspective of the person playing. */
 export function statusText(chess: Chess, playerColor: PlayerColor, thinking: boolean, resigned: boolean): string {
-  if (resigned) return "Вы сдались.";
+  if (resigned) return t("stResigned");
   if (chess.isCheckmate()) {
     const winnerIsPlayer = chess.turn() !== playerColor;
-    return winnerIsPlayer ? "Мат! Вы выиграли." : "Мат! Победил бот.";
+    return winnerIsPlayer ? t("stMateWin") : t("stMateLoss");
   }
-  if (chess.isStalemate()) return "Пат — ничья.";
-  if (chess.isThreefoldRepetition()) return "Ничья — повторение позиции.";
-  if (chess.isInsufficientMaterial()) return "Ничья — недостаточно материала.";
-  if (chess.isDraw()) return "Ничья.";
-  if (thinking) return "Бот думает…";
-  const toMove = chess.turn() === playerColor ? "Ваш ход" : "Ход бота";
-  return chess.isCheck() ? `${toMove} — шах!` : toMove;
+  if (chess.isStalemate()) return t("stStalemate");
+  if (chess.isThreefoldRepetition()) return t("stRepetition");
+  if (chess.isInsufficientMaterial()) return t("stInsufficient");
+  if (chess.isDraw()) return t("stDraw");
+  if (thinking) return t("stThinking");
+  const toMove = chess.turn() === playerColor ? t("stYourMove") : t("stBotMove");
+  return chess.isCheck() ? t("stCheck", { move: toMove }) : toMove;
 }
 
 export function findKing(chess: Chess, color: Color): Square | null {
