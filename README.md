@@ -38,4 +38,5 @@ The chess piece artwork is not mine and is licensed separately from the plugin's
 
 ## License
 
-[MIT](LICENSE).
+The plugin's own code is [MIT](LICENSE). The bundled piece artwork is not covered
+by it and keeps its own license — see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -38,4 +38,5 @@ English: [README.md](README.md)
 
 ## Лицензия
 
-[MIT](LICENSE).
+Код плагина — [MIT](LICENSE). Рисунки фигур под неё не подпадают и живут по своей
+лицензии, см. [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
